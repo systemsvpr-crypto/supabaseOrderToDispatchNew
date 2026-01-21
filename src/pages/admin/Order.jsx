@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, X, Save } from 'lucide-react';
-import { seedDummyData } from '../../utils/seedData';
 import { useToast } from '../../contexts/ToastContext';
 import SearchableDropdown from '../../components/SearchableDropdown';
 
@@ -24,14 +23,9 @@ const Order = () => {
     const [godownFilter, setGodownFilter] = useState('');
 
     useEffect(() => {
+        // Data seeding is now handled by Dashboard.jsx for instant calculations
         const savedOrders = JSON.parse(localStorage.getItem('orders') || '[]');
-        if (savedOrders.length === 0) {
-            // Auto-seed data if no orders exist
-            const result = seedDummyData();
-            setOrders(JSON.parse(localStorage.getItem('orders') || '[]'));
-        } else {
-            setOrders(savedOrders);
-        }
+        setOrders(savedOrders);
     }, []);
 
     // Derive unique clients and godowns from actual data

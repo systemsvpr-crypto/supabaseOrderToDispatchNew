@@ -17,6 +17,7 @@ import {
   Calendar
 } from "lucide-react";
 import { useToast } from '../../contexts/ToastContext';
+import { seedDummyData } from '../../utils/seedData';
 
 const Dashboard = () => {
   const { showToast } = useToast();
@@ -40,7 +41,12 @@ const Dashboard = () => {
   const loadDashboardData = () => {
     setLoading(true);
     try {
-      const orders = JSON.parse(localStorage.getItem('orders') || '[]');
+      // Auto-seed data if no orders exist (moved from Order.jsx for instant dashboard calculations)
+      let orders = JSON.parse(localStorage.getItem('orders') || '[]');
+      if (orders.length === 0) {
+        seedDummyData();
+        orders = JSON.parse(localStorage.getItem('orders') || '[]');
+      }
       const dispatchHistory = JSON.parse(localStorage.getItem('dispatchHistory') || '[]');
 
       const calculatedStats = {
