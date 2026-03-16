@@ -145,8 +145,8 @@ const SearchableDropdown = ({
                                     key={idx}
                                     type="button"
                                     onClick={() => handleSelect(opt)}
-                                    className={`w-full text-left px-3 py-2.5 text-sm rounded-lg transition-all mb-1 whitespace-normal ${isFocused ? 'bg-red-800 text-white shadow-lg scale-[1.02] z-10' :
-                                            isSelected ? 'bg-red-50 text-red-800 font-bold border-l-4 border-red-800' :
+                                    className={`w-full text-left px-3 py-2.5 text-sm rounded-lg transition-all mb-1 whitespace-normal ${isFocused ? `bg-${focusColor} text-white shadow-lg scale-[1.02] z-10` :
+                                            isSelected ? `bg-${focusColor}/10 text-${focusColor} font-bold border-l-4 border-${focusColor}` :
                                                 'text-gray-600 hover:bg-gray-50'
                                         }`}
                                 >

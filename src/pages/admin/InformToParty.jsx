@@ -32,21 +32,14 @@ const InformToParty = () => {
     const fetchData = async () => {
         setIsLoading(true);
         try {
-            // Parallel fetch for both sheets
-            const [planningRes, beforeDispatchRes] = await Promise.all([
-                fetch(`${ORDER_URL}?sheet=Planning&mode=table`),
-                fetch(`${ORDER_URL}?sheet=Before Dispatch&mode=table`)
-            ]);
+            // Fetch only Planning sheet (columns O and P are now included)
+            const planningRes = await fetch(`${ORDER_URL}?sheet=Planning&mode=table`);
+            const planningResult = await planningRes.json();
 
-            const [planningResult, beforeDispatchResult] = await Promise.all([
-                planningRes.json(),
-                beforeDispatchRes.json()
-            ]);
-            
             if (planningResult.success && planningResult.data) {
-                const pendingData = planningResult.data.map((item, index) => ({
+                const allItems = planningResult.data.map((item, index) => ({
                     id: `P${index}`,
-                    orderNo: item.orderNo || item.orderNumber || '-',
+                    orderNo: item.orderNumber || '-',
                     dispatchNo: item.dispatchNo || '-',
                     clientName: item.clientName || '-',
                     godownName: item.godownName || '-',
@@ -54,24 +47,24 @@ const InformToParty = () => {
                     qty: item.qty || '-',
                     dispatchQty: item.dispatchQty || '-',
                     dispatchDate: item.dispatchDate || '-',
+                    columnO: item.columnO || '',
+                    columnP: item.columnP || ''
                 }));
-                setPendingItems(pendingData);
-            }
 
-            if (beforeDispatchResult.success && beforeDispatchResult.data) {
-                const historyData = beforeDispatchResult.data.map((item, index) => ({
-                    id: `H${index}`,
-                    orderNo: item.orderNo || '-',
-                    dispatchNo: item.dispatchNo || '-',
-                    confirmed: String(item.confirmed || 'YES').trim().toUpperCase(),
-                    clientName: item.clientName || '-',
-                    godownName: item.godownName || '-',
-                    itemName: item.itemName || '-',
-                    qty: item.qty || '-',
-                    dispatchQty: item.dispatchQty || '-',
-                    dispatchDate: item.timestamp || '-'
-                }));
-                setHistoryItems(historyData);
+                // Pending: columnO not empty, columnP empty
+                const pending = allItems.filter(item => 
+                    item.columnO && item.columnO.toString().trim() !== '' && 
+                    (!item.columnP || item.columnP.toString().trim() === '')
+                );
+
+                // History: both columnO and columnP not empty
+                const history = allItems.filter(item => 
+                    item.columnO && item.columnO.toString().trim() !== '' && 
+                    item.columnP && item.columnP.toString().trim() !== ''
+                );
+
+                setPendingItems(pending);
+                setHistoryItems(history);
             }
 
         } catch (error) {
@@ -165,7 +158,7 @@ const InformToParty = () => {
 
             alert('Confirmation saved to "Before Dispatch" sheet successfully!');
             
-            // Refresh data to show updated 'Planning' status (which should hide these rows)
+            // Refresh data to show updated status (Planning columns O/P are not updated here)
             await fetchData();
             setSelectedRows({});
         } catch (error) {
@@ -324,8 +317,8 @@ const InformToParty = () => {
                                     <td className="px-4 py-3">{item.qty}</td>
                                     {activeTab === 'history' && (
                                         <td className="px-4 py-3">
-                                            <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${item.confirmed === 'YES' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                                {item.confirmed || 'YES'}
+                                            <span className="px-2 py-1 rounded-full text-[10px] font-bold bg-green-100 text-green-700">
+                                                Informed
                                             </span>
                                         </td>
                                     )}
@@ -375,8 +368,8 @@ const InformToParty = () => {
                                     </div>
                                 </div>
                                 {activeTab === 'history' && (
-                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${item.confirmed === 'YES' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                                        {item.confirmed || 'YES'}
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">
+                                        Informed
                                     </span>
                                 )}
                             </div>

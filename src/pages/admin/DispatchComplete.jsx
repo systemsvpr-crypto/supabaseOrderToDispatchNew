@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CheckCircle, History, Save, Loader } from 'lucide-react';
+import { CheckCircle, History, Save, Loader, ChevronDown } from 'lucide-react';
 import SearchableDropdown from '../../components/SearchableDropdown';
 
 const DispatchComplete = () => {
@@ -279,14 +279,18 @@ const DispatchComplete = () => {
         setSelectedRows({ ...selectedRows, [realIdx]: isSelected });
 
         if (isSelected) {
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const yesterdayStr = yesterday.toISOString().split('T')[0];
+
             setEditData({
                 ...editData,
                 [realIdx]: {
                     product: item.itemName,
                     godown: item.godownName,
                     dispatchQty: item.dispatchQty,
-                    completeDate: new Date().toISOString().split('T')[0],
-                    status: 'pending'
+                    completeDate: yesterdayStr,
+                    status: 'Completed'
                 }
             });
         } else {
@@ -331,13 +335,17 @@ const DispatchComplete = () => {
                     planningRowNumber: originalItem.sheetRow,
                     dispatchNo: originalItem.dispatchNo,
                     dispatchDate: formatDateToYYYYMMDD(originalItem.dispatchDate),
-                    completeDate: formatDateToYYYYMMDD(edit.completeDate || new Date()), // COLUMN D
+                    completeDate: formatDateToYYYYMMDD(edit.completeDate || (() => {
+                        const d = new Date();
+                        d.setDate(d.getDate() - 1);
+                        return d;
+                    })()), // COLUMN D (Default to Yesterday)
                     customer: originalItem.clientName,
                     product: edit.product || originalItem.itemName,
                     godown: edit.godown || originalItem.godownName,
                     orderQty: originalItem.qty,
                     dispatchQty: edit.dispatchQty || originalItem.dispatchQty,
-                    status: edit.status || 'approved',
+                    status: edit.status || 'Completed',
                     crmName: originalItem.crmName
                 });
                 indicesToRemove.push(idx);
@@ -474,8 +482,8 @@ const DispatchComplete = () => {
                                 <th className="px-4 py-3 border-l border-gray-100">Dispatch Qty</th>
                                 {activeTab === 'pending' && <th className="px-4 py-3 text-green-700">Complete Date</th>}
                                 {activeTab === 'history' && <th className="px-4 py-3">Complete Date</th>}
-                                {activeTab === 'pending' && <th className="px-4 py-3 text-green-700">Status</th>}
-                                {activeTab === 'history' && <th className="px-4 py-3">Status</th>}
+                                {activeTab === 'pending' && <th className="px-4 py-3 text-green-700 min-w-[140px]">Status</th>}
+                                {activeTab === 'history' && <th className="px-4 py-3 min-w-[120px]">Status</th>}
                                 {activeTab === 'pending' && <th className="px-4 py-3 border-l border-gray-100">CRM Name</th>}
                             </tr>
                         </thead>
@@ -521,7 +529,7 @@ const DispatchComplete = () => {
                                             )}
                                         </td>
 
-                                        <td className="px-4 py-3 text-center font-bold text-gray-800">
+                                        <td className={`px-4 py-3 text-center font-bold text-gray-800 relative ${isSelected ? 'z-[60]' : ''}`}>
                                             {activeTab === 'pending' && isSelected ? (
                                                 <div className="w-40 mx-auto">
                                                     <SearchableDropdown
@@ -556,7 +564,7 @@ const DispatchComplete = () => {
 
                                         {activeTab === 'pending' && (
                                             <>
-                                                <td className="px-4 py-3">
+                                                <td className={`px-4 py-3 relative ${isSelected ? 'z-[50]' : ''}`}>
                                                     <input
                                                         type="date"
                                                         disabled={!isSelected}
@@ -565,16 +573,25 @@ const DispatchComplete = () => {
                                                         className="px-1 py-0.5 border rounded text-xs outline-none focus:border-green-800"
                                                     />
                                                 </td>
-                                                <td className="px-4 py-3">
-                                                    <select
-                                                        disabled={!isSelected}
-                                                        value={editData[realIdx]?.status || 'pending'}
-                                                        onChange={(e) => handleEditChange(realIdx, 'status', e.target.value)}
-                                                        className="px-1 py-0.5 border rounded text-xs outline-none focus:border-green-800 bg-white"
-                                                    >
-                                                        <option value="pending">pending</option>
-                                                        <option value="approved">approved</option>
-                                                    </select>
+                                                <td className={`px-4 py-3 relative ${isSelected ? 'z-[50]' : ''}`}>
+                                                    <div className="relative group">
+                                                        <select
+                                                            disabled={!isSelected}
+                                                            value={editData[realIdx]?.status || 'Completed'}
+                                                            onChange={(e) => handleEditChange(realIdx, 'status', e.target.value)}
+                                                            className={`w-full pl-3 pr-8 py-2 border border-gray-200 rounded-xl text-xs font-semibold appearance-none bg-white transition-all shadow-sm ${
+                                                                isSelected 
+                                                                    ? 'cursor-pointer hover:border-green-300 focus:ring-2 focus:ring-green-800 focus:border-transparent outline-none' 
+                                                                    : 'bg-gray-50 opacity-70 cursor-not-allowed'
+                                                            }`}
+                                                        >
+                                                            <option value="Completed">Completed</option>
+                                                            <option value="Pending">Pending</option>
+                                                        </select>
+                                                        <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
+                                                            <ChevronDown size={14} />
+                                                        </div>
+                                                    </div>
                                                 </td>
                                             </>
                                         )}
@@ -603,8 +620,7 @@ const DispatchComplete = () => {
                     </table>
                 </div>
 
-                {/* Mobile Card View (simplified, similar updates needed but omitted for brevity) */}
-                {/* ... */}
+                {/* Mobile Card View – omitted for brevity, but should be updated similarly */}
             </div>
         </div>
     );
