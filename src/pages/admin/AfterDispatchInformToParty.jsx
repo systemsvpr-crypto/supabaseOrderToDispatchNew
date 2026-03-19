@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
-import { Mail, History, Save } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Mail, History, Save, ChevronUp, ChevronDown, RefreshCw } from 'lucide-react';
 import SearchableDropdown from '../../components/SearchableDropdown';
+
+const CACHE_KEY = 'afterDispatchInformData';
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
 const AfterDispatchInformToParty = () => {
     const [pendingItems, setPendingItems] = useState([]);
@@ -12,27 +15,52 @@ const AfterDispatchInformToParty = () => {
     const [searchTerm, setSearchTerm] = useState('');
     const [clientFilter, setClientFilter] = useState('');
     const [godownFilter, setGodownFilter] = useState('');
+    const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
 
     const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
     const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
 
-    // Fetch pending items from Planning, filter by columns T and U
-    const fetchPendingItems = async () => {
+    // --- Cache helpers ---
+    const loadFromCache = useCallback(() => {
+        const cached = sessionStorage.getItem(CACHE_KEY);
+        if (!cached) return null;
+        try {
+            const { pending, history, timestamp } = JSON.parse(cached);
+            const age = Date.now() - timestamp;
+            if (age < CACHE_DURATION) return { pending, history };
+        } catch (e) { /* ignore */ }
+        return null;
+    }, []);
+
+    const saveToCache = useCallback((pending, history) => {
+        sessionStorage.setItem(CACHE_KEY, JSON.stringify({
+            pending,
+            history,
+            timestamp: Date.now()
+        }));
+    }, []);
+
+    // --- Fetch data ---
+    const fetchPendingItems = useCallback(async (force = false) => {
         setIsLoading(true);
         try {
             if (!API_URL) return;
 
-            // Fetch only Planning sheet (columns T and U are now included)
-            const planningRes = await fetch(`${API_URL}?sheet=Planning&mode=table${SHEET_ID ? `&sheetId=${SHEET_ID}` : ''}`);
-            const planningResult = await planningRes.json();
+            const [planningRes, historyRes] = await Promise.all([
+                fetch(`${API_URL}?sheet=Planning&mode=table${SHEET_ID ? `&sheetId=${SHEET_ID}` : ''}`),
+                fetch(`${API_URL}?sheet=After%20Dispatch&mode=table${SHEET_ID ? `&sheetId=${SHEET_ID}` : ''}`)
+            ]);
 
+            const [planningResult, historyResult] = await Promise.all([
+                planningRes.json(),
+                historyRes.json()
+            ]);
+
+            // Handling Pending from Planning Sheet
             if (planningResult.success && Array.isArray(planningResult.data)) {
-                // Skip first 3 rows (metadata) – adjust if needed
                 const planningData = planningResult.data.slice(3);
-
-                // Map API data and include columnT/columnU
-                const allItems = planningData.map(item => ({
-                    originalIndex: item.originalIndex,
+                const pending = planningData.map((item, idx) => ({
+                    originalIndex: idx,
                     sheetRow: item.sheetRow,
                     dispatchNo: item.dispatchNo || '-',
                     dispatchDate: item.dispatchDate || '-',
@@ -45,79 +73,164 @@ const AfterDispatchInformToParty = () => {
                     dispatchQty: item.dispatchQty || '0',
                     columnT: item.columnT || '',
                     columnU: item.columnU || ''
-                }));
-
-                // Pending: columnT not empty, columnU empty
-                const pending = allItems.filter(item => 
-                    item.columnT && item.columnT.toString().trim() !== '' && 
-                    (!item.columnU || item.columnU.toString().trim() === '')
-                );
-
-                // History: both columnT and columnU not empty
-                const history = allItems.filter(item => 
-                    item.columnT && item.columnT.toString().trim() !== '' && 
-                    item.columnU && item.columnU.toString().trim() !== ''
-                );
-
+                })).filter(item => {
+                    const colT = String(item.columnT || '').trim();
+                    const colU = String(item.columnU || '').trim();
+                    // Show in pending if: T is empty OR U is empty (only skip if BOTH have values)
+                    return colT === '' || colU === '';
+                });
                 setPendingItems(pending);
+            }
+
+            // Handling History from After Dispatch Sheet
+            if (historyResult.success && Array.isArray(historyResult.data)) {
+                // If it's mode=table, it might contain headers if they aren't handled by backend
+                const data = historyResult.data;
+                const hasHeaders = data.length > 0 && 
+                    (String(data[0].dispatchNo || '').toLowerCase().includes('dispatch') || 
+                     String(data[0][0] || '').toLowerCase().includes('dispatch'));
+                
+                const processData = hasHeaders ? data.slice(1) : data;
+
+                const history = processData.map((item, idx) => ({
+                    originalIndex: idx,
+                    dispatchNo: item.dispatchNo || (Array.isArray(item) ? item[0] : '-'),
+                    dispatchDate: item.dispatchDate || (Array.isArray(item) ? item[1] : '-'),
+                    orderNo: item.orderNo || (Array.isArray(item) ? item[2] : '-'),
+                    customerName: item.customer || item.customerName || (Array.isArray(item) ? item[3] : '-'),
+                    productName: item.productName || (Array.isArray(item) ? item[4] : '-'),
+                    godown: item.godown || (Array.isArray(item) ? item[5] : '-'),
+                    crmName: item.crmName || (Array.isArray(item) ? item[6] : '-'),
+                    orderQty: item.orderQty || (Array.isArray(item) ? item[7] : '0'),
+                    dispatchQty: item.dispatchQty || (Array.isArray(item) ? item[8] : '0'),
+                    notified: true
+                }));
                 setHistoryItems(history);
-            } else {
-                console.error('Failed to fetch Planning data:', planningResult.error);
             }
         } catch (error) {
-            console.error('Error fetching pending items:', error);
+            console.error('Error fetching data:', error);
         } finally {
             setIsLoading(false);
         }
+    }, [API_URL, SHEET_ID]); // Stable fetcher
+
+    // On mount: load from cache or fetch
+    useEffect(() => {
+        const cached = loadFromCache();
+        if (cached) {
+            setPendingItems(cached.pending);
+            setHistoryItems(cached.history);
+        } else {
+            fetchPendingItems();
+        }
+    }, [loadFromCache, fetchPendingItems]);
+
+    // Cache sync effect: automatically save whenever state changes
+    useEffect(() => {
+        if (pendingItems.length > 0 || historyItems.length > 0) {
+            saveToCache(pendingItems, historyItems);
+        }
+    }, [pendingItems, historyItems, saveToCache]);
+
+    // --- Manual refresh ---
+    const handleRefresh = useCallback(() => {
+        sessionStorage.removeItem(CACHE_KEY);
+        fetchPendingItems(true);
+    }, [fetchPendingItems]);
+
+    // --- Unique filter values ---
+    const allUniqueClients = useMemo(() =>
+        [...new Set([...pendingItems.map(o => o.customerName), ...historyItems.map(h => h.customerName)])].sort(),
+        [pendingItems, historyItems]
+    );
+    const allUniqueGodowns = useMemo(() =>
+        [...new Set([...pendingItems.map(o => o.godown), ...historyItems.map(h => h.godown)])].sort(),
+        [pendingItems, historyItems]
+    );
+
+    // --- Sorting ---
+    const requestSort = (key) => {
+        let direction = 'asc';
+        if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
+        setSortConfig({ key, direction });
     };
 
-    useEffect(() => {
-        fetchPendingItems();
-    }, []);
+    const getSortedItems = useCallback((itemsToSort) => {
+        if (!sortConfig.key) return itemsToSort;
+        return [...itemsToSort].sort((a, b) => {
+            let aVal = a[sortConfig.key];
+            let bVal = b[sortConfig.key];
 
-    // Compute unique clients and godowns for filters
-    const allUniqueClients = [...new Set([...pendingItems.map(o => o.customerName), ...historyItems.map(h => h.customerName)])].sort();
-    const allUniqueGodowns = [...new Set([...pendingItems.map(o => o.godown), ...historyItems.map(h => h.godown)])].sort();
+            const aNum = parseFloat(String(aVal).replace(/[^0-9.-]+/g, ''));
+            const bNum = parseFloat(String(bVal).replace(/[^0-9.-]+/g, ''));
+            if (!isNaN(aNum) && !isNaN(bNum)) {
+                return sortConfig.direction === 'asc' ? aNum - bNum : bNum - aNum;
+            }
 
-    const filteredPending = pendingItems.filter(item => {
-        const matchesSearch = Object.values(item).some(val =>
-            String(val).toLowerCase().includes(searchTerm.toLowerCase())
-        );
-        const matchesClient = !clientFilter || item.customerName === clientFilter;
-        const matchesGodown = !godownFilter || item.godown === godownFilter;
-        return matchesSearch && matchesClient && matchesGodown;
-    });
+            if (sortConfig.key.toLowerCase().includes('date')) {
+                const aDate = new Date(aVal);
+                const bDate = new Date(bVal);
+                if (!isNaN(aDate) && !isNaN(bDate)) {
+                    return sortConfig.direction === 'asc' ? aDate - bDate : bDate - aDate;
+                }
+            }
 
-    const filteredHistory = historyItems.filter(item => {
-        const matchesSearch = Object.values(item).some(val =>
-            String(val).toLowerCase().includes(searchTerm.toLowerCase())
-        );
-        const matchesClient = !clientFilter || item.customerName === clientFilter;
-        const matchesGodown = !godownFilter || item.godown === godownFilter;
-        return matchesSearch && matchesClient && matchesGodown;
-    });
+            aVal = String(aVal || '').toLowerCase();
+            bVal = String(bVal || '').toLowerCase();
+            if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+            if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }, [sortConfig]);
 
+    const filteredAndSortedPending = useMemo(() =>
+        getSortedItems(
+            pendingItems.filter(item => {
+                const matchesSearch = Object.values(item).some(val =>
+                    String(val).toLowerCase().includes(searchTerm.toLowerCase())
+                );
+                const matchesClient = !clientFilter || item.customerName === clientFilter;
+                const matchesGodown = !godownFilter || item.godown === godownFilter;
+                return matchesSearch && matchesClient && matchesGodown;
+            })
+        ),
+        [pendingItems, searchTerm, clientFilter, godownFilter, getSortedItems]
+    );
+
+    const filteredAndSortedHistory = useMemo(() =>
+        getSortedItems(
+            historyItems.filter(item => {
+                const matchesSearch = Object.values(item).some(val =>
+                    String(val).toLowerCase().includes(searchTerm.toLowerCase())
+                );
+                const matchesClient = !clientFilter || item.customerName === clientFilter;
+                const matchesGodown = !godownFilter || item.godown === godownFilter;
+                return matchesSearch && matchesClient && matchesGodown;
+            })
+        ),
+        [historyItems, searchTerm, clientFilter, godownFilter, getSortedItems]
+    );
+
+    // --- Actions ---
     const handleCheckboxToggle = (realIdx) => {
         setSelectedRows(prev => ({ ...prev, [realIdx]: !prev[realIdx] }));
     };
 
     const handleSave = async () => {
-        // Gather selected items
         const selectedItems = pendingItems.filter(item => selectedRows[item.originalIndex]);
         if (selectedItems.length === 0) return;
 
         setIsSaving(true);
         try {
-            // Prepare rows for POST to "After Dispatch" sheet
             const rowsToSubmit = selectedItems.map(item => ({
-                dispatchNo: item.dispatchNo,               // column B
-                customer: item.customerName,               // column C
-                godown: item.godown,                       // column D
-                productName: item.productName,             // column E
-                crmName: item.crmName,                     // column F
-                orderQty: item.orderQty,                   // column G
-                dispatchQty: item.dispatchQty,             // column H
-                status: "yes"                               // column I – always "yes"
+                dispatchNo: item.dispatchNo,
+                customer: item.customerName,
+                godown: item.godown,
+                productName: item.productName,
+                crmName: item.crmName,
+                orderQty: item.orderQty,
+                dispatchQty: item.dispatchQty,
+                status: "yes"
             }));
 
             const response = await fetch(API_URL, {
@@ -131,17 +244,18 @@ const AfterDispatchInformToParty = () => {
             });
 
             const result = await response.json();
-            if (!result.success) {
-                throw new Error(result.error || 'Unknown error');
-            }
+            if (!result.success) throw new Error(result.error || 'Unknown error');
 
-            // On success, move items from pending to history
+            // Optimistic update
             const newlyNotified = selectedItems.map(item => ({ ...item, notified: true }));
             const remainingPending = pendingItems.filter(item => !selectedRows[item.originalIndex]);
+            const newHistory = [...historyItems, ...newlyNotified];
             setPendingItems(remainingPending);
-            setHistoryItems([...historyItems, ...newlyNotified]);
+            setHistoryItems(newHistory);
             setSelectedRows({});
 
+            // Update cache
+            saveToCache(remainingPending, newHistory);
         } catch (error) {
             console.error('Error saving to After Dispatch:', error);
             alert(`Failed to save: ${error.message}`);
@@ -150,7 +264,6 @@ const AfterDispatchInformToParty = () => {
         }
     };
 
-    // Common date formatter
     const formatDisplayDate = (dateStr) => {
         if (!dateStr || dateStr === '-') return '-';
         try {
@@ -175,18 +288,16 @@ const AfterDispatchInformToParty = () => {
                 <div className="flex bg-gray-100 p-1 rounded-lg">
                     <button
                         onClick={() => setActiveTab('pending')}
-                        className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
-                            activeTab === 'pending' ? 'bg-white text-indigo-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${activeTab === 'pending' ? 'bg-white text-indigo-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         <Mail size={16} />
                         Pending
                     </button>
                     <button
                         onClick={() => setActiveTab('history')}
-                        className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
-                            activeTab === 'history' ? 'bg-white text-indigo-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                        }`}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${activeTab === 'history' ? 'bg-white text-indigo-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                            }`}
                     >
                         <History size={16} />
                         History
@@ -194,6 +305,16 @@ const AfterDispatchInformToParty = () => {
                 </div>
 
                 <div className="flex-1" />
+
+                {/* Refresh Button */}
+                <button
+                    onClick={handleRefresh}
+                    disabled={isLoading || isSaving}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-xs font-bold border border-gray-200 disabled:opacity-50"
+                >
+                    <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
+                    Refresh
+                </button>
 
                 <input
                     type="text"
@@ -247,7 +368,7 @@ const AfterDispatchInformToParty = () => {
                 </div>
             )}
 
-            {/* Data Table */}
+            {/* Data Table (unchanged) */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 {/* Desktop Table */}
                 <div className="hidden md:block overflow-x-auto scrollbar-thin scrollbar-thumb-gray-300 max-h-[460px] overflow-y-auto">
@@ -255,21 +376,37 @@ const AfterDispatchInformToParty = () => {
                         <thead>
                             <tr className="bg-gray-50 border-b border-gray-200 text-xs uppercase text-gray-600 font-bold sticky top-0 z-10 shadow-sm">
                                 {activeTab === 'pending' && <th className="px-4 py-3">Action</th>}
-                                <th className="px-4 py-3">Dispatch No</th>
-                                <th className="px-4 py-3">Dispatch Date</th>
-                                <th className="px-4 py-3">Order No</th>
-                                <th className="px-4 py-3">Customer Name</th>
-                                <th className="px-4 py-3">Product Name</th>
-                                <th className="px-4 py-3">Godown</th>
-                                <th className="px-4 py-3">CRM Name</th>
-                                <th className="px-4 py-3">Order Qty</th>
-                                <th className="px-4 py-3">Status</th>
-                                <th className="px-4 py-3">Dispatch Qty</th>
-                                {activeTab === 'history' && <th className="px-4 py-3">Notified</th>}
+                                {[
+                                    { label: 'Dispatch No', key: 'dispatchNo', color: 'indigo' },
+                                    { label: 'Dispatch Date', key: 'dispatchDate' },
+                                    { label: 'Order No', key: 'orderNo' },
+                                    { label: 'Customer Name', key: 'customerName' },
+                                    { label: 'Product Name', key: 'productName' },
+                                    { label: 'Godown', key: 'godown' },
+                                    { label: 'CRM Name', key: 'crmName' },
+                                    { label: 'Order Qty', key: 'orderQty' },
+                                    { label: 'Status', key: 'status' },
+                                    { label: 'Dispatch Qty', key: 'dispatchQty', color: 'indigo' },
+                                    ...(activeTab === 'history' ? [{ label: 'Notified', key: 'notified' }] : [])
+                                ].map((col) => (
+                                    <th
+                                        key={col.key}
+                                        className={`px-4 py-3 cursor-pointer hover:bg-gray-100 transition-colors ${col.color === 'indigo' ? 'text-indigo-700' : ''}`}
+                                        onClick={() => requestSort(col.key)}
+                                    >
+                                        <div className="flex items-center gap-1">
+                                            {col.label}
+                                            <div className="flex flex-col">
+                                                <ChevronUp size={10} className={sortConfig.key === col.key && sortConfig.direction === 'asc' ? 'text-indigo-800' : 'text-gray-300'} />
+                                                <ChevronDown size={10} className={sortConfig.key === col.key && sortConfig.direction === 'desc' ? 'text-indigo-800' : 'text-gray-300'} />
+                                            </div>
+                                        </div>
+                                    </th>
+                                ))}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200 text-sm">
-                            {(activeTab === 'pending' ? filteredPending : filteredHistory).map((item) => {
+                            {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).map((item) => {
                                 const realIdx = item.originalIndex;
                                 const isSelected = activeTab === 'pending' && !!selectedRows[realIdx];
                                 return (
@@ -294,11 +431,11 @@ const AfterDispatchInformToParty = () => {
                                         <td className="px-4 py-3 text-gray-600">{item.orderQty}</td>
                                         <td className="px-4 py-3">
                                             {activeTab === 'pending' ? (
-                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700`}>
+                                                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700">
                                                     Pending
                                                 </span>
                                             ) : (
-                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700`}>
+                                                <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700">
                                                     Informed
                                                 </span>
                                             )}
@@ -312,7 +449,7 @@ const AfterDispatchInformToParty = () => {
                                     </tr>
                                 );
                             })}
-                            {(activeTab === 'pending' ? filteredPending : filteredHistory).length === 0 && (
+                            {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).length === 0 && (
                                 <tr>
                                     <td colSpan={activeTab === 'pending' ? 12 : 13} className="px-4 py-8 text-center text-gray-500 italic">
                                         No items found.
@@ -323,9 +460,9 @@ const AfterDispatchInformToParty = () => {
                     </table>
                 </div>
 
-                {/* Mobile Card View (unchanged except status) */}
+                {/* Mobile Card View (unchanged) */}
                 <div className="md:hidden divide-y divide-gray-200">
-                    {(activeTab === 'pending' ? filteredPending : filteredHistory).map((item) => {
+                    {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).map((item) => {
                         const realIdx = item.originalIndex;
                         const isSelected = activeTab === 'pending' && !!selectedRows[realIdx];
                         return (
@@ -389,7 +526,7 @@ const AfterDispatchInformToParty = () => {
                             </div>
                         );
                     })}
-                    {(activeTab === 'pending' ? filteredPending : filteredHistory).length === 0 && (
+                    {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).length === 0 && (
                         <div className="p-8 text-center text-gray-500 italic text-sm">No items found.</div>
                     )}
                 </div>

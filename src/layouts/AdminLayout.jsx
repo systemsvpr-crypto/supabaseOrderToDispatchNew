@@ -10,6 +10,9 @@ import {
   BellRing,
   CheckCircle,
   Mail,
+  PackageX,
+  Warehouse,
+  FileText,
   Settings as SettingsIcon,
 } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
@@ -55,13 +58,17 @@ const AdminLayout = () => {
     { label: "Inform to Party Before Dispatch", path: "/admin/notify-party", icon: BellRing },
     { label: "Dispatch Completed", path: "/admin/dispatch-done", icon: CheckCircle },
     { label: "Inform to Party After Dispatch", path: "/admin/post-dispatch-notify", icon: Mail },
+    { label: "Skip Delivered", path: "/admin/skip-delivered", icon: PackageX },
+    { label: "Godown", path: "/admin/godown", icon: Warehouse },
+    { label: "PC Report", path: "/admin/pc-report", icon: FileText },
     { label: "Settings", path: "/admin/settings", icon: SettingsIcon },
   ];
 
   // Filter items based on user's pageAccess
-  const filteredNavItems = navigationItems.filter(item =>
-    user?.pageAccess?.includes(item.label)
-  );
+  const filteredNavItems = navigationItems.filter(item => {
+    // Case-insensitive check for strict adherence to pageAccess array
+    return user?.pageAccess?.some(p => p.toLowerCase().trim() === item.label.toLowerCase().trim());
+  });
 
   return (
     <div className="min-h-screen flex flex-col bg-gray-50">
@@ -147,7 +154,7 @@ const AdminLayout = () => {
         </aside>
 
         {/* Main content */}
-        <main className="flex-1 ml-0 lg:ml-56 w-full lg:w-[calc(100%-14rem)] bg-gray-50 min-h-[calc(100vh-3.5rem)]">
+        <main className="flex-1 ml-0 lg:ml-56 w-full lg:w-[calc(100%-14rem)] bg-gray-50 min-h-[calc(100vh-3.5rem)] pb-14 sm:pb-20">
           <div className="p-0 sm:p-2">
             <Outlet />
           </div>

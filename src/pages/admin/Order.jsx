@@ -1,7 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, X, Save } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Plus, X, Save, ChevronUp, ChevronDown, RefreshCw } from 'lucide-react';
 import { useToast } from '../../contexts/ToastContext';
 import SearchableDropdown from '../../components/SearchableDropdown';
+
+const CACHE_KEY = 'orderData';
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
 
 const Order = () => {
     const { showToast } = useToast();
@@ -24,12 +27,37 @@ const Order = () => {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isLoadingOrders, setIsLoadingOrders] = useState(false);
     const [showSuccessOverlay, setShowSuccessOverlay] = useState(false);
+    const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
 
     const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
     const MASTER_URL = import.meta.env.VITE_MASTER_URL;
     const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
 
-    // Date formatter (e.g., 25-Feb-2026)
+    // --- Cache helpers ---
+    const loadFromCache = useCallback(() => {
+        const cached = sessionStorage.getItem(CACHE_KEY);
+        if (!cached) return null;
+        try {
+            const { orders, itemNames, clients, godowns, timestamp } = JSON.parse(cached);
+            const age = Date.now() - timestamp;
+            if (age < CACHE_DURATION) {
+                return { orders, itemNames, clients, godowns };
+            }
+        } catch (e) { /* ignore */ }
+        return null;
+    }, []);
+
+    const saveToCache = useCallback((ordersData, itemNamesData, clientsData, godownsData) => {
+        sessionStorage.setItem(CACHE_KEY, JSON.stringify({
+            orders: ordersData,
+            itemNames: itemNamesData,
+            clients: clientsData,
+            godowns: godownsData,
+            timestamp: Date.now()
+        }));
+    }, []);
+
+    // --- Date formatter ---
     const formatDisplayDate = (dateStr) => {
         if (!dateStr || dateStr === '-') return '-';
         try {
@@ -45,15 +73,8 @@ const Order = () => {
         }
     };
 
-    useEffect(() => {
-        fetchProducts();
-        fetchClients();
-        fetchGodowns();
-        fetchOrders();
-    }, []);
-
-    // ----- Fetch orders from the ORDER sheet -----
-    const fetchOrders = async () => {
+    // ----- Fetch orders from the ORDER sheet - Stable Fetcher -----
+    const fetchOrders = useCallback(async (force = false) => {
         setIsLoadingOrders(true);
         try {
             if (!API_URL) {
@@ -75,23 +96,16 @@ const Order = () => {
             let dataArray = result.data;
             if (!Array.isArray(dataArray)) dataArray = [];
 
-            // If dataArray is empty, keep empty list
             if (dataArray.length === 0) {
                 setOrders([]);
                 return;
             }
 
-            // Determine if response is array of objects or array of arrays
             const isArrayData = Array.isArray(dataArray[0]);
-
-            // The image shows data starts at Row 7. 
-            // If Apps Script returns data starting from Row 2 (slice(1)), 
-            // then index 5 in the returned array corresponds to Row 7.
             const dataToMap = dataArray.slice(5);
 
             let mappedOrders;
             if (isArrayData) {
-                // Fallback for array-of-arrays (adjust indices to your sheet)
                 mappedOrders = dataToMap.map(item => ({
                     orderNumber: item[1] || '-',
                     orderDate:   item[2] || '-',
@@ -104,7 +118,6 @@ const Order = () => {
                     intransitQty: item[9] || '-'
                 }));
             } else {
-                // Use the clean object keys returned by the API
                 mappedOrders = dataToMap.map(item => ({
                     orderNumber: item.orderNumber || '-',
                     orderDate:   item.orderDate   || '-',
@@ -125,56 +138,143 @@ const Order = () => {
         } finally {
             setIsLoadingOrders(false);
         }
-    };
+    }, [API_URL, SHEET_ID, showToast]); // Stable: No data dependencies
 
-    // ----- Fetch master data (products, clients, godowns) -----
-    const fetchProducts = async () => {
-        if (!MASTER_URL) return;
-        try {
-            const res = await fetch(`${MASTER_URL}?sheet=Products`);
-            const json = await res.json();
-            if (json.success && json.data) setItemNames(json.data);
-        } catch (error) {
-            console.error('fetchProducts error:', error);
+    // ----- Fetch master data (products, clients, godowns) - Stable -----
+    const fetchMasterData = useCallback(async () => {
+        const url = MASTER_URL?.trim();
+        if (!url) {
+            console.error('MASTER_URL is not defined or empty');
+            return;
         }
-    };
 
-    const fetchClients = async () => {
-        if (!MASTER_URL) return;
         try {
-            const res = await fetch(`${MASTER_URL}?sheet=Sales Vendor`);
-            const json = await res.json();
-            if (json.success && json.data) setClients(json.data);
+            const [productsRes, clientsRes, godownsRes] = await Promise.all([
+                fetch(`${url}?sheet=Products`),
+                fetch(`${url}?sheet=Sales Vendor`),
+                fetch(`${url}?sheet=Products&col=4`)
+            ]);
+
+            const [productsJson, clientsJson, godownsJson] = await Promise.all([
+                productsRes.json(),
+                clientsRes.json(),
+                godownsRes.json()
+            ]);
+
+            const processData = (json) => {
+                if (json.success && Array.isArray(json.data)) {
+                    // If it's a 2D array (array of arrays), flatten it by taking the first element of each row
+                    if (Array.isArray(json.data[0])) {
+                        return json.data.map(row => row[0]).filter(val => val !== null && val !== undefined && val !== '');
+                    }
+                    return json.data.filter(val => val !== null && val !== undefined && val !== '');
+                }
+                return [];
+            };
+
+            const newItems = processData(productsJson);
+            const newClients = processData(clientsJson);
+            const newGodowns = processData(godownsJson);
+
+            setItemNames(newItems);
+            setClients(newClients);
+            setGodowns(newGodowns);
+
+            console.log('Master data loaded:', {
+                items: newItems.length,
+                clients: newClients.length,
+                godowns: newGodowns.length
+            });
         } catch (error) {
-            console.error('fetchClients error:', error);
+            console.error('fetchMasterData error:', error);
+            showToast('Error', 'Failed to load master data: ' + error.message);
         }
+    }, [MASTER_URL, showToast]); // Stable: No state dependencies
+
+    // On mount: load from cache or fetch
+    useEffect(() => {
+        const cached = loadFromCache();
+        if (cached) {
+            setOrders(cached.orders);
+            setItemNames(cached.itemNames);
+            setClients(cached.clients);
+            setGodowns(cached.godowns);
+        } else {
+            fetchOrders();
+            fetchMasterData();
+        }
+    }, [loadFromCache, fetchOrders, fetchMasterData]);
+
+    // Dedicated Cache Sync Effect: Watches for changes and updates sessionStorage
+    useEffect(() => {
+        if (orders.length > 0 || itemNames.length > 0 || clients.length > 0 || godowns.length > 0) {
+            saveToCache(orders, itemNames, clients, godowns);
+        }
+    }, [orders, itemNames, clients, godowns, saveToCache]);
+
+    // --- Manual refresh ---
+    const handleRefresh = useCallback(() => {
+        sessionStorage.removeItem(CACHE_KEY);
+        fetchOrders(true);
+        fetchMasterData();
+    }, [fetchOrders, fetchMasterData]);
+
+    // --- Filtering and sorting ---
+    const requestSort = (key) => {
+        let direction = 'asc';
+        if (sortConfig.key === key && sortConfig.direction === 'asc') {
+            direction = 'desc';
+        }
+        setSortConfig({ key, direction });
     };
 
-    const fetchGodowns = async () => {
-        if (!MASTER_URL) return;
-        try {
-            const res = await fetch(`${MASTER_URL}?sheet=Products&col=4`);
-            const json = await res.json();
-            if (json.success && json.data) setGodowns(json.data);
-        } catch (error) {
-            console.error('fetchGodowns error:', error);
-        }
-    };
+    const getSortedItems = useCallback((itemsToSort) => {
+        if (!sortConfig.key) return itemsToSort;
 
-    // ----- Filtering -----
-    const filterClients = [...clients].sort((a, b) => String(a).localeCompare(b));
-    const filterGodowns = [...godowns].sort((a, b) => String(a).localeCompare(b));
+        return [...itemsToSort].sort((a, b) => {
+            let aVal = a[sortConfig.key];
+            let bVal = b[sortConfig.key];
 
-    const filteredOrders = orders.filter(order => {
-        const matchesSearch = Object.values(order).some(val =>
-            String(val).toLowerCase().includes(searchTerm.toLowerCase())
-        );
-        const matchesClient = !clientFilter || order.clientName === clientFilter;
-        const matchesGodown = !godownFilter || order.godownName === godownFilter;
-        return matchesSearch && matchesClient && matchesGodown;
-    });
+            const aNum = parseFloat(String(aVal).replace(/[^0-9.-]+/g, ''));
+            const bNum = parseFloat(String(bVal).replace(/[^0-9.-]+/g, ''));
+            if (!isNaN(aNum) && !isNaN(bNum)) {
+                return sortConfig.direction === 'asc' ? aNum - bNum : bNum - aNum;
+            }
 
-    // ----- Form handlers -----
+            if (sortConfig.key === 'orderDate') {
+                const aDate = new Date(aVal);
+                const bDate = new Date(bVal);
+                if (!isNaN(aDate) && !isNaN(bDate)) {
+                    return sortConfig.direction === 'asc' ? aDate - bDate : bDate - aDate;
+                }
+            }
+
+            aVal = String(aVal).toLowerCase();
+            bVal = String(bVal).toLowerCase();
+            if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+            if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }, [sortConfig]);
+
+    const filterClients = useMemo(() => [...new Set(orders.map(o => o.clientName))].filter(Boolean).sort(), [orders]);
+    const filterGodowns = useMemo(() => [...new Set(orders.map(o => o.godownName))].filter(Boolean).sort(), [orders]);
+
+    const filteredAndSortedOrders = useMemo(() => 
+        getSortedItems(
+            orders.filter(order => {
+                const matchesSearch = Object.values(order).some(val =>
+                    String(val).toLowerCase().includes(searchTerm.toLowerCase())
+                );
+                const matchesClient = !clientFilter || order.clientName === clientFilter;
+                const matchesGodown = !godownFilter || order.godownName === godownFilter;
+                return matchesSearch && matchesClient && matchesGodown;
+            })
+        ),
+        [orders, searchTerm, clientFilter, godownFilter, getSortedItems]
+    );
+
+    // --- Form handlers ---
     const handleAddItem = () => {
         setFormData(prev => ({
             ...prev,
@@ -197,59 +297,59 @@ const Order = () => {
         });
     };
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (isSubmitting) return;
+   const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (isSubmitting) return;
 
-        setIsSubmitting(true);
-        try {
-            if (!API_URL || !SHEET_ID) {
-                showToast('Error', 'Missing API URL or Sheet ID');
-                return;
-            }
-
-            const payload = {
-                sheet: 'ORDER',
-                sheetId: SHEET_ID,
-                rows: formData.items.map(item => ({
-                    orderDate: formData.orderDate,
-                    clientName: formData.clientName,
-                    godownName: formData.godownName,
-                    itemName: item.itemName,
-                    rate: item.rate,
-                    qty: item.qty
-                }))
-            };
-
-            // Use normal fetch (avoid 'no-cors' to see errors)
-            await fetch(API_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            // Success overlay and reset
-            setShowSuccessOverlay(true);
-            setFormData({
-                orderDate: new Date().toISOString().split('T')[0],
-                clientName: '',
-                godownName: '',
-                items: [{ itemName: '', rate: '', qty: '' }]
-            });
-            setIsModalOpen(false);
-
-            // Refresh orders after a short delay
-            setTimeout(() => {
-                fetchOrders();
-                setShowSuccessOverlay(false);
-            }, 2500);
-        } catch (error) {
-            console.error('Submit error:', error);
-            showToast('Error', 'Submission failed');
-        } finally {
-            setIsSubmitting(false);
+    setIsSubmitting(true);
+    try {
+        if (!API_URL || !SHEET_ID) {
+            showToast('Error', 'Missing API URL or Sheet ID');
+            return;
         }
-    };
+
+        const payload = {
+            sheet: 'ORDER',
+            sheetId: SHEET_ID,
+            rows: formData.items.map(item => ({
+                orderDate: formData.orderDate,
+                clientName: formData.clientName,
+                godownName: formData.godownName,
+                itemName: item.itemName,
+                rate: item.rate,
+                qty: item.qty
+            }))
+        };
+
+        // ✅ Fix: use no-cors mode and text/plain content type
+        await fetch(API_URL, {
+            method: 'POST',
+            mode: 'no-cors',               // prevents preflight
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify(payload)
+        });
+
+        // Success overlay and reset
+        setShowSuccessOverlay(true);
+        setFormData({
+            orderDate: new Date().toISOString().split('T')[0],
+            clientName: '',
+            godownName: '',
+            items: [{ itemName: '', rate: '', qty: '' }]
+        });
+        setIsModalOpen(false);
+
+        // Invalidate cache and refetch orders
+        sessionStorage.removeItem(CACHE_KEY);
+        await fetchOrders(true);
+        setTimeout(() => setShowSuccessOverlay(false), 2500);
+    } catch (error) {
+        console.error('Submit error:', error);
+        showToast('Error', 'Submission failed');
+    } finally {
+        setIsSubmitting(false);
+    }
+};
 
     // ----- Render -----
     return (
@@ -257,6 +357,16 @@ const Order = () => {
             {/* Header */}
             <div className="flex flex-wrap items-center gap-3 mb-6 bg-white p-4 rounded-xl shadow-sm border border-gray-100">
                 <h1 className="text-xl font-bold text-gray-800 mr-auto">Orders</h1>
+
+                {/* Refresh button */}
+                <button
+                    onClick={handleRefresh}
+                    disabled={isLoadingOrders}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-xs font-bold border border-gray-200 disabled:opacity-50"
+                >
+                    <RefreshCw size={14} className={isLoadingOrders ? 'animate-spin' : ''} />
+                    Refresh
+                </button>
 
                 <input
                     type="text"
@@ -313,33 +423,49 @@ const Order = () => {
                 </div>
             )}
 
-            {/* Data table / cards */}
+            {/* Data table / cards (unchanged) */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 {/* Desktop table */}
                 <div className="hidden md:block overflow-x-auto max-h-[460px] overflow-y-auto">
                     <table className="w-full text-left border-collapse">
                         <thead className="bg-gray-50 border-b border-gray-200 text-xs uppercase text-gray-600 font-bold sticky top-0 z-10">
                             <tr>
-                                <th className="px-4 py-3">Order Number</th>
-                                <th className="px-4 py-3">Order Date</th>
-                                <th className="px-4 py-3">Client</th>
-                                <th className="px-4 py-3">Godown</th>
-                                <th className="px-4 py-3">Item</th>
-                                <th className="px-4 py-3">Rate</th>
-                                <th className="px-4 py-3 text-right">Qty</th>
-                                <th className="px-4 py-3">Current Stock</th>
-                                <th className="px-4 py-3">Intransit</th>
+                                {[
+                                    { label: 'Order Number', key: 'orderNumber' },
+                                    { label: 'Order Date', key: 'orderDate' },
+                                    { label: 'Client', key: 'clientName' },
+                                    { label: 'Godown', key: 'godownName' },
+                                    { label: 'Item', key: 'itemName' },
+                                    { label: 'Rate', key: 'rate' },
+                                    { label: 'Qty', key: 'qty', align: 'right' },
+                                    { label: 'Current Stock', key: 'currentStock' },
+                                    { label: 'Intransit', key: 'intransitQty' }
+                                ].map((col) => (
+                                    <th
+                                        key={col.key}
+                                        className={`px-4 py-3 cursor-pointer hover:bg-gray-100 transition-colors ${col.align === 'right' ? 'text-right' : ''}`}
+                                        onClick={() => requestSort(col.key)}
+                                    >
+                                        <div className={`flex items-center gap-1 ${col.align === 'right' ? 'justify-end' : ''}`}>
+                                            {col.label}
+                                            <div className="flex flex-col">
+                                                <ChevronUp size={10} className={sortConfig.key === col.key && sortConfig.direction === 'asc' ? 'text-red-800' : 'text-gray-300'} />
+                                                <ChevronDown size={10} className={sortConfig.key === col.key && sortConfig.direction === 'desc' ? 'text-red-800' : 'text-gray-300'} />
+                                            </div>
+                                        </div>
+                                    </th>
+                                ))}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200">
-                            {filteredOrders.length === 0 ? (
+                            {filteredAndSortedOrders.length === 0 ? (
                                 <tr>
                                     <td colSpan="9" className="px-4 py-8 text-center text-gray-500 italic">
                                         No orders found.
                                     </td>
                                 </tr>
                             ) : (
-                                filteredOrders.map((order, idx) => (
+                                filteredAndSortedOrders.map((order, idx) => (
                                     <tr key={idx} className="hover:bg-gray-50">
                                         <td className="px-4 py-3 font-bold text-red-800">{order.orderNumber}</td>
                                         <td className="px-4 py-3 text-gray-600 text-xs">{formatDisplayDate(order.orderDate)}</td>
@@ -357,12 +483,12 @@ const Order = () => {
                     </table>
                 </div>
 
-                {/* Mobile cards */}
+                {/* Mobile cards (unchanged) */}
                 <div className="md:hidden divide-y divide-gray-200">
-                    {filteredOrders.length === 0 ? (
+                    {filteredAndSortedOrders.length === 0 ? (
                         <div className="p-8 text-center text-gray-500 italic">No orders found.</div>
                     ) : (
-                        filteredOrders.map((order, idx) => (
+                        filteredAndSortedOrders.map((order, idx) => (
                             <div key={idx} className="p-4 space-y-2">
                                 <div className="flex justify-between items-start">
                                     <h4 className="font-bold text-gray-900">{order.clientName}</h4>
@@ -398,7 +524,7 @@ const Order = () => {
                 </div>
             </div>
 
-            {/* Add Order Modal */}
+            {/* Add Order Modal (unchanged) */}
             {isModalOpen && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center sm:p-4 bg-black/50 backdrop-blur-sm">
                     <div className="bg-white sm:rounded-2xl shadow-2xl w-full h-full sm:h-[90vh] sm:max-w-4xl flex flex-col overflow-hidden">
@@ -543,7 +669,6 @@ const Order = () => {
                 </div>
             )}
 
-            {/* Embedded Styles (safe inside component) */}
             <style>{`
                 @keyframes spin-slow {
                     from { transform: rotate(0deg); }

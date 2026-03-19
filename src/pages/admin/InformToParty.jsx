@@ -1,10 +1,14 @@
-import React, { useState, useEffect } from 'react';
-import { BellRing, History, Save, X } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { BellRing, History, Save, X, ChevronUp, ChevronDown, RefreshCw } from 'lucide-react';
 import SearchableDropdown from '../../components/SearchableDropdown';
 
 const ORDER_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
 
-const InformToParty = () => {
+// Cache configuration
+const CACHE_KEY = 'informToPartyBeforeData';
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
+
+const InformToPartyBeforeDispatch = () => {
     const [pendingItems, setPendingItems] = useState([]);
     const [historyItems, setHistoryItems] = useState([]);
     const [activeTab, setActiveTab] = useState('pending');
@@ -13,6 +17,7 @@ const InformToParty = () => {
     const [clientFilter, setClientFilter] = useState('');
     const [godownFilter, setGodownFilter] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
 
     const formatDisplayDate = (dateStr) => {
         if (!dateStr || dateStr === '-') return '-';
@@ -29,15 +34,15 @@ const InformToParty = () => {
         }
     };
 
-    const fetchData = async () => {
+    // Fetch data from Planning sheet – using columns K and L
+    const fetchData = useCallback(async (forceRefresh = false) => {
         setIsLoading(true);
         try {
-            // Fetch only Planning sheet (columns O and P are now included)
             const planningRes = await fetch(`${ORDER_URL}?sheet=Planning&mode=table`);
             const planningResult = await planningRes.json();
 
             if (planningResult.success && planningResult.data) {
-                const allItems = planningResult.data.map((item, index) => ({
+                const allItems = planningResult.data.slice(4).map((item, index) => ({
                     id: `P${index}`,
                     orderNo: item.orderNumber || '-',
                     dispatchNo: item.dispatchNo || '-',
@@ -47,64 +52,141 @@ const InformToParty = () => {
                     qty: item.qty || '-',
                     dispatchQty: item.dispatchQty || '-',
                     dispatchDate: item.dispatchDate || '-',
-                    columnO: item.columnO || '',
-                    columnP: item.columnP || ''
+                    columnK: item.columnK || '',
+                    columnL: item.columnL || ''
                 }));
 
-                // Pending: columnO not empty, columnP empty
+                // Pending: columnK not empty, columnL empty
                 const pending = allItems.filter(item => 
-                    item.columnO && item.columnO.toString().trim() !== '' && 
-                    (!item.columnP || item.columnP.toString().trim() === '')
+                    item.columnK && item.columnK.toString().trim() !== '' && 
+                    (!item.columnL || item.columnL.toString().trim() === '')
                 );
 
-                // History: both columnO and columnP not empty
+                // History: both columnK and columnL not empty
                 const history = allItems.filter(item => 
-                    item.columnO && item.columnO.toString().trim() !== '' && 
-                    item.columnP && item.columnP.toString().trim() !== ''
+                    item.columnK && item.columnK.toString().trim() !== '' && 
+                    item.columnL && item.columnL.toString().trim() !== ''
                 );
 
                 setPendingItems(pending);
                 setHistoryItems(history);
             }
-
         } catch (error) {
             console.error('Error fetching data:', error);
         } finally {
             setIsLoading(false);
         }
-    };
+    }, []); // Stable fetcher
 
+    // Load cached data on mount, or fetch if stale/missing
     useEffect(() => {
+        const cached = sessionStorage.getItem(CACHE_KEY);
+        if (cached) {
+            try {
+                const { pendingItems: cachedPending, historyItems: cachedHistory, timestamp } = JSON.parse(cached);
+                const age = Date.now() - timestamp;
+                if (age < CACHE_DURATION) {
+                    setPendingItems(cachedPending);
+                    setHistoryItems(cachedHistory);
+                    return; // Use cache, skip fetch
+                }
+            } catch (e) {
+                // Cache corrupted – ignore and fetch fresh
+            }
+        }
         fetchData();
+    }, [fetchData]);
+
+    // Auto‑cache on state changes
+    useEffect(() => {
+        if (pendingItems.length > 0 || historyItems.length > 0) {
+            const cacheData = {
+                pendingItems,
+                historyItems,
+                timestamp: Date.now()
+            };
+            sessionStorage.setItem(CACHE_KEY, JSON.stringify(cacheData));
+        }
+    }, [pendingItems, historyItems]);
+
+    // Memoized Filter Options
+    const allUniqueClients = useMemo(() => 
+        [...new Set([...pendingItems.map(o => o.clientName), ...historyItems.map(h => h.clientName)])].sort(),
+        [pendingItems, historyItems]
+    );
+
+    const allUniqueGodowns = useMemo(() => 
+        [...new Set([...pendingItems.map(o => o.godownName), ...historyItems.map(h => h.godownName)])].sort(),
+        [pendingItems, historyItems]
+    );
+
+    // Sorting logic
+    const requestSort = useCallback((key) => {
+        setSortConfig(prev => ({
+            key,
+            direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+        }));
     }, []);
 
-    const allUniqueClients = [...new Set([...pendingItems.map(o => o.clientName), ...historyItems.map(h => h.clientName)])].sort();
-    const allUniqueGodowns = [...new Set([...pendingItems.map(o => o.godownName), ...historyItems.map(h => h.godownName)])].sort();
+    const getSortedItems = useCallback((itemsToSort) => {
+        if (!sortConfig.key) return itemsToSort;
 
-    const filteredPending = pendingItems.filter(item => {
-        const matchesSearch = Object.values(item).some(val =>
-            String(val).toLowerCase().includes(searchTerm.toLowerCase())
-        );
-        const matchesClient = clientFilter === '' || item.clientName === clientFilter;
-        const matchesGodown = godownFilter === '' || item.godownName === godownFilter;
-        return matchesSearch && matchesClient && matchesGodown;
-    });
+        return [...itemsToSort].sort((a, b) => {
+            let aVal = a[sortConfig.key];
+            let bVal = b[sortConfig.key];
 
-    const filteredHistory = historyItems.filter(item => {
-        const matchesSearch = Object.values(item).some(val =>
-            String(val).toLowerCase().includes(searchTerm.toLowerCase())
-        );
-        const matchesClient = clientFilter === '' || item.clientName === clientFilter;
-        const matchesGodown = godownFilter === '' || item.godownName === godownFilter;
-        return matchesSearch && matchesClient && matchesGodown;
-    });
+            const aNum = parseFloat(String(aVal).replace(/[^0-9.-]+/g, ''));
+            const bNum = parseFloat(String(bVal).replace(/[^0-9.-]+/g, ''));
+            if (!isNaN(aNum) && !isNaN(bNum)) {
+                return sortConfig.direction === 'asc' ? aNum - bNum : bNum - aNum;
+            }
+
+            if (sortConfig.key.toLowerCase().includes('date')) {
+                const aDate = new Date(aVal);
+                const bDate = new Date(bVal);
+                if (!isNaN(aDate) && !isNaN(bDate)) {
+                    return sortConfig.direction === 'asc' ? aDate - bDate : bDate - aDate;
+                }
+            }
+
+            aVal = String(aVal || '').toLowerCase();
+            bVal = String(bVal || '').toLowerCase();
+            if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+            if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }, [sortConfig]);
+
+    const filteredAndSortedPending = useMemo(() => {
+        const filtered = pendingItems.filter(item => {
+            const matchesSearch = Object.values(item).some(val =>
+                String(val).toLowerCase().includes(searchTerm.toLowerCase())
+            );
+            const matchesClient = clientFilter === '' || item.clientName === clientFilter;
+            const matchesGodown = godownFilter === '' || item.godownName === godownFilter;
+            return matchesSearch && matchesClient && matchesGodown;
+        });
+        return getSortedItems(filtered);
+    }, [pendingItems, searchTerm, clientFilter, godownFilter, getSortedItems]);
+
+    const filteredAndSortedHistory = useMemo(() => {
+        const filtered = historyItems.filter(item => {
+            const matchesSearch = Object.values(item).some(val =>
+                String(val).toLowerCase().includes(searchTerm.toLowerCase())
+            );
+            const matchesClient = clientFilter === '' || item.clientName === clientFilter;
+            const matchesGodown = godownFilter === '' || item.godownName === godownFilter;
+            return matchesSearch && matchesClient && matchesGodown;
+        });
+        return getSortedItems(filtered);
+    }, [historyItems, searchTerm, clientFilter, godownFilter, getSortedItems]);
 
     const handleCheckboxToggle = (dn) => {
         const newSelected = { ...selectedRows };
         if (newSelected[dn]) {
             delete newSelected[dn];
         } else {
-            newSelected[dn] = 'yes'; // Default to 'yes' when checked
+            newSelected[dn] = 'yes';
         }
         setSelectedRows(newSelected);
     };
@@ -131,14 +213,14 @@ const InformToParty = () => {
 
             rowsToSubmit.push({
                 timestamp: now,
-                columnB: item.dispatchNo,       // B: Dispatch No
-                columnC: selectedRows[dn] === 'yes' ? 'YES' : 'NO', // C: YES/NO
-                columnD: item.clientName,      // D: Client
-                columnE: item.godownName,      // E: Godown
-                columnF: item.itemName,        // F: Item
-                columnG: item.qty,             // G: Order Qty
-                columnH: item.dispatchQty,      // H: Dispatch Qty
-                dispatchNo: item.dispatchNo    // For backend lookup
+                columnB: item.dispatchNo,
+                columnC: selectedRows[dn] === 'yes' ? 'YES' : 'NO',
+                columnD: item.clientName,
+                columnE: item.godownName,
+                columnF: item.itemName,
+                columnG: item.qty,
+                columnH: item.dispatchQty,
+                dispatchNo: item.dispatchNo
             });
         });
 
@@ -158,8 +240,7 @@ const InformToParty = () => {
 
             alert('Confirmation saved to "Before Dispatch" sheet successfully!');
             
-            // Refresh data to show updated status (Planning columns O/P are not updated here)
-            await fetchData();
+            // Clear selected rows – no need to refetch because Planning sheet remains unchanged
             setSelectedRows({});
         } catch (error) {
             console.error('Submission failed:', error);
@@ -169,26 +250,36 @@ const InformToParty = () => {
         }
     };
 
+    // Manual refresh
+    const handleRefresh = () => {
+        sessionStorage.removeItem(CACHE_KEY);
+        fetchData(true);
+    };
+
     return (
         <div className="p-3 sm:p-6 lg:p-8">
-            {/* Header Row with Title, Tabs, Filters, and Actions */}
+            {/* Header */}
             <div className="flex flex-col gap-4 mb-6 bg-white p-4 lg:p-5 rounded-xl shadow-sm border border-gray-100">
-                {/* Top Section: Title & Tabs & Actions */}
+                {/* Top row: title, tabs, actions */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div className="flex flex-wrap items-center gap-4">
-                        <h1 className="text-xl font-bold text-gray-800 tracking-tight whitespace-nowrap">Inform to Party</h1>
+                        <h1 className="text-xl font-bold text-gray-800 tracking-tight whitespace-nowrap">Inform to Party (Before Dispatch)</h1>
 
                         <div className="flex bg-gray-100 p-1 rounded-lg">
                             <button
                                 onClick={() => setActiveTab('pending')}
-                                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-bold transition-all ${activeTab === 'pending' ? 'bg-white text-blue-800 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
+                                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-bold transition-all ${
+                                    activeTab === 'pending' ? 'bg-white text-blue-800 shadow-sm' : 'text-gray-500 hover:text-gray-800'
+                                }`}
                             >
                                 <BellRing size={16} />
                                 Pending
                             </button>
                             <button
                                 onClick={() => setActiveTab('history')}
-                                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-bold transition-all ${activeTab === 'history' ? 'bg-white text-blue-800 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
+                                className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-bold transition-all ${
+                                    activeTab === 'history' ? 'bg-white text-blue-800 shadow-sm' : 'text-gray-500 hover:text-gray-800'
+                                }`}
                             >
                                 <History size={16} />
                                 History
@@ -197,6 +288,15 @@ const InformToParty = () => {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
+                        <button
+                            onClick={handleRefresh}
+                            disabled={isLoading}
+                            className="flex items-center gap-1.5 px-3 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors text-xs font-bold border border-gray-200 disabled:opacity-50"
+                        >
+                            <RefreshCw size={14} className={isLoading ? 'animate-spin' : ''} />
+                            Refresh
+                        </button>
+
                         {(searchTerm || clientFilter || godownFilter) && (
                             <button
                                 onClick={() => { setSearchTerm(''); setClientFilter(''); setGodownFilter(''); }}
@@ -219,7 +319,7 @@ const InformToParty = () => {
                     </div>
                 </div>
 
-                {/* Bottom Section: Grid Filters */}
+                {/* Filters */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
                     <input
                         type="text"
@@ -247,6 +347,7 @@ const InformToParty = () => {
                 </div>
             </div>
 
+            {/* Loading overlay */}
             {isLoading && (
                 <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/20 backdrop-blur-[2px]">
                     <div className="bg-white p-8 rounded-2xl shadow-2xl flex flex-col items-center gap-4 border border-gray-100">
@@ -264,6 +365,7 @@ const InformToParty = () => {
                 </div>
             )}
 
+            {/* Data Table */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 {/* Desktop Table */}
                 <div className="hidden md:block overflow-x-auto scrollbar-thin scrollbar-thumb-gray-300 max-h-[460px] overflow-y-auto">
@@ -271,19 +373,35 @@ const InformToParty = () => {
                         <thead>
                             <tr className="bg-gray-50 border-b border-gray-200 text-xs uppercase text-gray-600 font-bold sticky top-0 z-10 shadow-sm">
                                 {activeTab === 'pending' && <th className="px-4 py-3">Action</th>}
-                                {activeTab === 'pending' && <th className="px-4 py-3">Order No</th>}
-                                <th className="px-4 py-3 text-blue-700">Dispatch Number</th>
-                                <th className="px-4 py-3">Dispatch Qty</th>
-                                <th className="px-4 py-3">Dispatch Date</th>
-                                <th className="px-4 py-3">Client Name</th>
-                                <th className="px-4 py-3">Godown Name</th>
-                                <th className="px-4 py-3">Item Name</th>
-                                <th className="px-4 py-3">Qty</th>
-                                {activeTab === 'history' && <th className="px-4 py-3">Status</th>}
+                                {[
+                                    ...(activeTab === 'pending' ? [{ label: 'Order No', key: 'orderNo' }] : []),
+                                    { label: 'Dispatch Number', key: 'dispatchNo', color: 'blue' },
+                                    { label: 'Dispatch Qty', key: 'dispatchQty' },
+                                    { label: 'Dispatch Date', key: 'dispatchDate' },
+                                    { label: 'Client Name', key: 'clientName' },
+                                    { label: 'Godown Name', key: 'godownName' },
+                                    { label: 'Item Name', key: 'itemName' },
+                                    { label: 'Qty', key: 'qty' },
+                                    ...(activeTab === 'history' ? [{ label: 'Status', key: 'status' }] : [])
+                                ].map((col) => (
+                                    <th
+                                        key={col.key}
+                                        className={`px-4 py-3 cursor-pointer hover:bg-gray-100 transition-colors ${col.color === 'blue' ? 'text-blue-700' : ''}`}
+                                        onClick={() => requestSort(col.key)}
+                                    >
+                                        <div className="flex items-center gap-1">
+                                            {col.label}
+                                            <div className="flex flex-col">
+                                                <ChevronUp size={10} className={sortConfig.key === col.key && sortConfig.direction === 'asc' ? 'text-blue-800' : 'text-gray-300'} />
+                                                <ChevronDown size={10} className={sortConfig.key === col.key && sortConfig.direction === 'desc' ? 'text-blue-800' : 'text-gray-300'} />
+                                            </div>
+                                        </div>
+                                    </th>
+                                ))}
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-200 text-sm">
-                            {[...(activeTab === 'pending' ? filteredPending : filteredHistory)].reverse().map((item, idx) => (
+                            {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).map((item) => (
                                 <tr key={item.id} className={`${selectedRows[item.dispatchNo] ? 'bg-blue-50/50' : 'hover:bg-gray-50'}`}>
                                     {activeTab === 'pending' && (
                                         <td className="px-4 py-3">
@@ -324,7 +442,7 @@ const InformToParty = () => {
                                     )}
                                 </tr>
                             ))}
-                            {(activeTab === 'pending' ? filteredPending : filteredHistory).length === 0 && (
+                            {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).length === 0 && (
                                 <tr>
                                     <td colSpan="14" className="px-4 py-8 text-center text-gray-500 italic">
                                         No items found matching your filters.
@@ -337,7 +455,7 @@ const InformToParty = () => {
 
                 {/* Mobile Card View */}
                 <div className="md:hidden divide-y divide-gray-200">
-                    {[...(activeTab === 'pending' ? filteredPending : filteredHistory)].reverse().map((item, idx) => (
+                    {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).map((item) => (
                         <div key={item.id} className={`p-4 space-y-3 ${selectedRows[item.dispatchNo] ? 'bg-blue-50/30' : 'bg-white'}`}>
                             <div className="flex justify-between items-start">
                                 <div className="flex gap-3 items-start">
@@ -395,7 +513,7 @@ const InformToParty = () => {
                             </div>
                         </div>
                     ))}
-                    {(activeTab === 'pending' ? filteredPending : filteredHistory).length === 0 && (
+                    {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).length === 0 && (
                         <div className="p-8 text-center text-gray-500 italic text-sm">No items found matching your filters.</div>
                     )}
                 </div>
@@ -414,4 +532,4 @@ const InformToParty = () => {
     );
 };
 
-export default InformToParty;
+export default InformToPartyBeforeDispatch;

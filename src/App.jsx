@@ -8,6 +8,9 @@ import DispatchPlanning from "./pages/admin/DispatchPlanning";
 import InformToParty from "./pages/admin/InformToParty";
 import DispatchComplete from "./pages/admin/DispatchComplete";
 import AfterDispatchInformToParty from "./pages/admin/AfterDispatchInformToParty";
+import SkipDelivered from "./pages/admin/SkipDelivered";
+import Godown from "./pages/admin/Godown";
+import PcReport from "./pages/admin/PcReport";
 import Settings from "./pages/admin/Settings";
 
 import AdminLayout from "./layouts/AdminLayout";
@@ -17,7 +20,8 @@ function App() {
 
   // Helper to check if user has access to a specific page name
   const hasAccess = (pageName) => {
-    return user?.pageAccess?.includes(pageName);
+    // Case-insensitive check for strict adherence to pageAccess array
+    return user?.pageAccess?.some(p => p.toLowerCase().trim() === pageName.toLowerCase().trim());
   };
 
   // Helper to find the first allowed admin route
@@ -29,6 +33,9 @@ function App() {
       { name: "Inform to Party Before Dispatch", path: "/admin/notify-party" },
       { name: "Dispatch Completed", path: "/admin/dispatch-done" },
       { name: "Inform to Party After Dispatch", path: "/admin/post-dispatch-notify" },
+      { name: "Skip Delivered", path: "/admin/skip-delivered" },
+      { name: "Godown", path: "/admin/godown" },
+      { name: "PC Report", path: "/admin/pc-report" },
       { name: "Settings", path: "/admin/settings" },
     ];
 
@@ -54,7 +61,7 @@ function App() {
           user ? (
             <Navigate
               to={
-                user.role === "admin" ? getFirstAllowedAdminRoute() : "/user/dashboard"
+                user.role === "admin" || user.role === "manager" ? getFirstAllowedAdminRoute() : "/user/dashboard"
               }
             />
           ) : (
@@ -103,6 +110,24 @@ function App() {
           </ProtectedRoute>
         } />
 
+        <Route path="skip-delivered" element={
+          <ProtectedRoute pageName="Skip Delivered">
+            <SkipDelivered />
+          </ProtectedRoute>
+        } />
+
+        <Route path="godown" element={
+          <ProtectedRoute pageName="Godown">
+            <Godown />
+          </ProtectedRoute>
+        } />
+
+        <Route path="pc-report" element={
+          <ProtectedRoute pageName="PC Report">
+            <PcReport />
+          </ProtectedRoute>
+        } />
+
         <Route path="settings" element={
           <ProtectedRoute pageName="Settings">
             <Settings />
@@ -122,7 +147,7 @@ function App() {
           user ? (
             <Navigate
               to={
-                user.role === "admin" ? getFirstAllowedAdminRoute() : "/user/dashboard"
+                user.role === "admin" || user.role === "manager" ? getFirstAllowedAdminRoute() : "/user/dashboard"
               }
             />
           ) : (
