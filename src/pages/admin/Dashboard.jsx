@@ -235,8 +235,23 @@ const Dashboard = () => {
           }
         });
 
-        // Get sorted months
-        const sortedMonths = Array.from(monthlyMap.keys()).sort();
+        // Get sorted months and ensure continuity
+        const rawMonths = Array.from(monthlyMap.keys()).sort();
+        let sortedMonths = [];
+        if (rawMonths.length > 0) {
+          try {
+            const start = new Date(rawMonths[0] + '-01');
+            const end = new Date(rawMonths[rawMonths.length - 1] + '-01');
+            let current = new Date(start);
+            while (current <= end) {
+              const mKey = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
+              sortedMonths.push(mKey);
+              current.setMonth(current.getMonth() + 1);
+            }
+          } catch (e) {
+            sortedMonths = rawMonths;
+          }
+        }
 
         // Store the master trend data
         setAllMonthlyMap({
@@ -346,8 +361,8 @@ const Dashboard = () => {
 
       datasets = matches.map(([name, dataMap], idx) => ({
         label: name,
-        data: months.map(m => (dataMap.get(m) || { qty: 0 }).qty),
-        extra: months.map(m => dataMap.get(m) || { planningQty: 0, remainingQty: 0, deliveredQty: 0, cancelQty: 0, completedCount: 0 }),
+        data: months.map(m => (dataMap.get(m) || { planningQty: 0 }).planningQty),
+        extra: months.map(m => dataMap.get(m) || { qty: 0, planningQty: 0, remainingQty: 0, deliveredQty: 0, cancelQty: 0, completedCount: 0 }),
         borderColor: colors[idx % 5],
         backgroundColor: colors[idx % 5].replace('1)', '0.1)'),
         fill: true,
@@ -361,8 +376,8 @@ const Dashboard = () => {
       // DEFAULT: Top 5 + Others aggregation
       const sortedClients = Array.from(clientData.entries())
         .sort((a, b) => {
-          const aTotal = Array.from(a[1].values()).reduce((sum, d) => sum + d.qty, 0);
-          const bTotal = Array.from(b[1].values()).reduce((sum, d) => sum + d.qty, 0);
+          const aTotal = Array.from(a[1].values()).reduce((sum, d) => sum + d.planningQty, 0);
+          const bTotal = Array.from(b[1].values()).reduce((sum, d) => sum + d.planningQty, 0);
           return bTotal - aTotal;
         });
 
@@ -371,8 +386,8 @@ const Dashboard = () => {
 
       datasets = top5.map(([name, dataMap], idx) => ({
         label: name,
-        data: months.map(m => (dataMap.get(m) || { qty: 0 }).qty),
-        extra: months.map(m => dataMap.get(m) || { planningQty: 0, remainingQty: 0, deliveredQty: 0, cancelQty: 0, completedCount: 0 }),
+        data: months.map(m => (dataMap.get(m) || { planningQty: 0 }).planningQty),
+        extra: months.map(m => dataMap.get(m) || { qty: 0, planningQty: 0, remainingQty: 0, deliveredQty: 0, cancelQty: 0, completedCount: 0 }),
         borderColor: colors[idx % 5],
         backgroundColor: colors[idx % 5].replace('1)', '0.1)'),
         fill: true,
@@ -403,14 +418,14 @@ const Dashboard = () => {
 
         datasets.push({
           label: `Others (${remaining.length} clients)`,
-          data: othersData.map(d => d.qty),
+          data: othersData.map(d => d.planningQty),
           extra: othersData,
           borderColor: colors[5],
           backgroundColor: colors[5].replace('1)', '0.1)'),
           fill: true,
           tension: 0.4,
           pointRadius: 2,
-          borderDash: [5, 5], // Professional dashed style for 'Others'
+          borderDash: [5, 5],
           pointHoverRadius: 4,
         });
       }
@@ -433,47 +448,75 @@ const Dashboard = () => {
     </div>
   );
 
-  const WorkflowStageCard = ({ title, pending, completed, icon: Icon, color, bgColor, stage }) => (
-    <div className="bg-white rounded border border-gray-100/50 p-5 shadow-sm hover:shadow-lg hover:ring-1 hover:ring-primary/20 transition-all duration-300 group">
-      <div className="flex items-center gap-3 mb-6">
-        <div className={`p-2.5 rounded ${bgColor} group-hover:rotate-12 transition-transform`}>
-          <Icon className={`w-5 h-5 ${color}`} />
-        </div>
-        <div>
-          <h4 className="font-bold text-gray-900 text-sm group-hover:text-primary transition-colors">{title}</h4>
-          <p className="text-[10px] text-gray-400 font-black uppercase tracking-tighter">Stage {stage}</p>
-        </div>
-      </div>
+  const WorkflowStageCard = ({ title, pending, completed, icon: Icon, color, bgColor, stage }) => {
+    const total = completed + pending;
+    const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
+    
+    // Improved color mapping for gradients and shadows
+    const colorClasses = {
+      'text-blue-600': 'from-blue-500 to-blue-400 shadow-blue-500/20',
+      'text-primary': 'from-[#58cc02] to-[#86efac] shadow-[#58cc02]/20',
+      'text-orange-600': 'from-orange-500 to-orange-400 shadow-orange-500/20',
+      'text-red-600': 'from-red-500 to-red-400 shadow-red-500/20'
+    };
+    
+    const barColorClass = colorClasses[color] || 'from-primary to-green-400 shadow-primary/20';
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-gray-50 p-3 rounded border border-gray-100">
-          <p className="text-[9px] font-bold text-gray-400 uppercase mb-1 flex items-center gap-1">
-            <Clock className="w-3 h-3 text-orange-500" /> Pending
-          </p>
-          <span className="text-xl font-black text-orange-600 leading-none">{pending}</span>
+    return (
+      <div className="bg-white rounded border border-gray-100/50 p-5 shadow-sm hover:shadow-lg hover:ring-1 hover:ring-primary/20 transition-all duration-300 group relative overflow-hidden">
+        {/* Decorative corner accent */}
+        <div className={`absolute top-0 right-0 w-24 h-24 -mr-8 -mt-8 rounded-full opacity-5 ${bgColor} group-hover:opacity-10 transition-opacity`} />
+        
+        <div className="flex items-center gap-3 mb-6 relative">
+          <div className={`p-2.5 rounded ${bgColor} group-hover:rotate-12 transition-transform shadow-sm`}>
+            <Icon className={`w-5 h-5 ${color}`} />
+          </div>
+          <div>
+            <h4 className="font-bold text-gray-900 text-sm group-hover:text-primary transition-colors">{title}</h4>
+            <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest">Stage {stage}</p>
+          </div>
         </div>
-        <div className="bg-gray-50 p-3 rounded border border-gray-100">
-          <p className="text-[9px] font-bold text-gray-400 uppercase mb-1 flex items-center gap-1">
-            <CheckCircle2 className="w-3 h-3 text-green-500" /> Done
-          </p>
-          <span className="text-xl font-black text-green-600 leading-none">{completed}</span>
-        </div>
-      </div>
 
-      <div className="mt-5 pt-4 border-t border-gray-50">
-        <div className="flex justify-between items-center text-[10px] font-bold text-gray-500 mb-2">
-          <span className="uppercase tracking-widest">Efficiency</span>
-          <span className={color}>{completed + pending > 0 ? Math.round((completed / (completed + pending)) * 100) : 0}%</span>
+        <div className="grid grid-cols-2 gap-4 mb-6">
+          <div className="bg-gray-50/80 p-3 rounded border border-gray-100/50 group-hover:bg-white transition-colors">
+            <p className="text-[9px] font-bold text-gray-400 uppercase mb-1 flex items-center gap-1">
+              <Clock className="w-3 h-3 text-orange-500" /> Pending
+            </p>
+            <span className="text-xl font-black text-orange-600 leading-none">{pending}</span>
+          </div>
+          <div className="bg-gray-50/80 p-3 rounded border border-gray-100/50 group-hover:bg-white transition-colors">
+            <p className="text-[9px] font-bold text-gray-400 uppercase mb-1 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3 text-green-500" /> Done
+            </p>
+            <span className="text-xl font-black text-green-600 leading-none">{completed}</span>
+          </div>
         </div>
-        <div className="w-full bg-gray-100 rounded h-1.5 overflow-hidden">
-          <div
-            className={`h-full rounded transition-all duration-1000 ${color.replace('text', 'bg')}`}
-            style={{ width: `${completed + pending > 0 ? (completed / (completed + pending)) * 100 : 0}%` }}
-          />
+
+        <div className="mt-auto space-y-3">
+          <div className="flex justify-between items-end">
+            <div className="flex flex-col">
+              <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Completion</span>
+              <span className={`text-lg font-black leading-none ${color}`}>{percentage}%</span>
+            </div>
+            <div className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${bgColor} ${color} uppercase tracking-tighter shadow-sm border border-current opacity-70`}>
+              Efficiency
+            </div>
+          </div>
+          
+          <div className="relative h-2.5 bg-gray-100 rounded-full overflow-hidden shadow-inner p-[2px]">
+            {/* Progress Bar with Gradient & Shimmer */}
+            <div
+              className={`h-full rounded-full bg-gradient-to-r ${barColorClass} transition-all duration-1000 ease-out shadow-lg relative`}
+              style={{ width: `${percentage}%` }}
+            >
+              <div className="absolute inset-0 bg-white/20 animate-pulse rounded-full" />
+              <div className="absolute inset-0 bg-[linear-gradient(45deg,rgba(255,255,255,0.15)_25%,transparent_25%,transparent_50%,rgba(255,255,255,0.15)_50%,rgba(255,255,255,0.15)_75%,transparent_75%,transparent)] bg-[length:24px_24px] opacity-20" />
+            </div>
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   if (loading) {
     return (
@@ -688,7 +731,7 @@ const Dashboard = () => {
                             const extra = dataset.extra ? dataset.extra[index] : null;
                             const label = dataset.label || '';
 
-                            const lines = [`${label}: ${context.parsed.y.toLocaleString()} Total Qty`];
+                            const lines = [`${label}: ${context.parsed.y.toLocaleString()} Planning Qty`];
 
                             if (extra) {
                               lines.push(`Planning Qty: ${extra.planningQty.toLocaleString()}`);
