@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, X, Save, ChevronUp, ChevronDown, RefreshCw } from 'lucide-react';
+import { Plus, X, Save, ChevronUp, ChevronDown, RefreshCw, Search } from 'lucide-react';
 import { useToast } from '../../contexts/ToastContext';
 import { useAuth } from '../../contexts/AuthContext';
 import SearchableDropdown from '../../components/SearchableDropdown';
@@ -358,50 +358,73 @@ const Order = () => {
 
     // ----- Render -----
     return (
-        <div className="p-3 sm:p-6 lg:p-8 space-y-6">
+        <div className="p-3 sm:p-6 space-y-6">
             {/* Header */}
-            <div className="flex flex-wrap items-center gap-3 bg-white/70 backdrop-blur-md p-6 rounded shadow-sm border border-white/50 max-w-[1200px] mx-auto">
-                <h1 className="text-xl font-bold text-gray-800 mr-auto">Orders</h1>
+            {/* Header Section */}
+            <div className="max-w-[1200px] mx-auto bg-white p-4 sm:p-8 rounded shadow-sm border border-gray-100">
+                <div className="flex flex-col gap-6">
+                    {/* Top Row: Title, Action Buttons */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                        <div className="flex items-center gap-4">
+                            <div className="bg-primary/10 rounded-xl">
+                                <Save className="text-primary w-6 h-6" />
+                            </div>
+                            <div>
+                                <h1 className="text-2xl font-black text-gray-900 tracking-tight">Orders</h1>
+                                <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mt-0.5">Manage Dispatch Orders</p>
+                            </div>
+                        </div>
 
-                {/* Refresh button */}
-                <button
-                    onClick={handleRefresh}
-                    disabled={isLoadingOrders}
-                    className="flex items-center gap-1.5 px-3 py-2 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors text-xs font-bold border border-gray-200 disabled:opacity-50"
-                >
-                    <RefreshCw size={14} className={isLoadingOrders ? 'animate-spin' : ''} />
-                    Refresh
-                </button>
+                        <div className="flex items-center gap-3">
+                            <button
+                                onClick={handleRefresh}
+                                disabled={isLoadingOrders}
+                                className="flex items-center justify-center gap-2 px-4 py-2 bg-gray-50 text-gray-600 rounded-xl hover:bg-gray-100 transition-all border border-gray-200 disabled:opacity-50 text-[10px] font-black uppercase tracking-widest"
+                            >
+                                <RefreshCw size={16} className={isLoadingOrders ? 'animate-spin' : ''} />
+                                <span className="hidden sm:inline">Refresh</span>
+                            </button>
+                            
+                            <button
+                                onClick={() => setIsModalOpen(true)}
+                                className="flex items-center justify-center gap-2 px-6 py-2 bg-primary text-white rounded-xl hover:bg-primary-hover shadow-lg shadow-primary/20 font-black text-[10px] uppercase tracking-widest transition-all active:scale-95"
+                            >
+                                <Plus size={16} className="stroke-[3]" />
+                                New Order
+                            </button>
+                        </div>
+                    </div>
 
-                <input
-                    type="text"
-                    placeholder="Search..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="w-40 lg:w-48 px-3 py-2 bg-gray-50 border border-gray-200 rounded focus:ring-primary focus:border-primary"
-                />
-                <SearchableDropdown
-                    value={clientFilter}
-                    onChange={setClientFilter}
-                    options={filterClients}
-                    allLabel="All Clients"
-                    className="w-36 lg:w-44"
-                />
-                <SearchableDropdown
-                    value={godownFilter}
-                    onChange={setGodownFilter}
-                    options={filterGodowns}
-                    allLabel="All Godowns"
-                    className="w-36 lg:w-44"
-                />
+                    {/* Bottom Row: Filters and Search */}
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-center border-t border-gray-50">
+                        <div className="md:col-span-2 relative">
+                            <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" />
+                            <input
+                                type="text"
+                                placeholder="Search by Client, Godown or Order Number..."
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                className="w-full pl-11 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-primary/10 focus:border-primary focus:bg-white outline-none transition-all text-sm font-medium"
+                            />
+                        </div>
 
-                <button
-                    onClick={() => setIsModalOpen(true)}
-                    className="flex items-center gap-2 px-6 py-2.5 bg-primary text-white rounded hover:bg-primary-hover shadow-lg shadow-primary/20 font-bold text-sm transition-all active:scale-95"
-                >
-                    <Plus size={18} />
-                    Add Order
-                </button>
+                        <SearchableDropdown
+                            value={clientFilter}
+                            onChange={setClientFilter}
+                            options={filterClients}
+                            allLabel="All Clients"
+                            className="w-full"
+                        />
+                        
+                        <SearchableDropdown
+                            value={godownFilter}
+                            onChange={setGodownFilter}
+                            options={filterGodowns}
+                            allLabel="All Godowns"
+                            className="w-full"
+                        />
+                    </div>
+                </div>
             </div>
 
             {/* Loading overlay */}
@@ -559,42 +582,66 @@ const Order = () => {
 
             {/* Add Order Modal */}
             {isModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center sm:p-4 bg-black/50 backdrop-blur-sm">
-                    <div className="bg-white sm:rounded shadow-2xl w-full h-full sm:h-[90vh] sm:max-w-4xl flex flex-col overflow-hidden">
-                        {/* Fixed Header */}
-                        <div className="p-4 sm:p-6 border-b border-gray-100 flex justify-between items-center bg-white shrink-0 z-30">
-                            <h2 className="text-xl font-bold text-gray-900">Add New Order</h2>
-                            <button onClick={() => setIsModalOpen(false)} className="text-gray-400 hover:text-gray-600 p-1 transition-colors hover:bg-gray-100 rounded">
-                                <X size={24} />
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-0 sm:p-6 lg:p-10 transition-all duration-500">
+                    {/* New Backdrop with blur */}
+                    <div 
+                        className="absolute inset-0 bg-gray-900/40 backdrop-blur-sm animate-in fade-in duration-300"
+                        onClick={() => !isSubmitting && setIsModalOpen(false)}
+                    />
+                    
+                    {/* Modal Card */}
+                    <div className="relative bg-white sm:rounded-[2.5rem] shadow-[0_40px_100px_rgba(0,0,0,0.25)] w-full h-full sm:h-auto sm:max-h-[85vh] sm:max-w-4xl lg:max-w-5xl flex flex-col overflow-hidden animate-in zoom-in-95 slide-in-from-bottom-10 duration-500 ease-out border border-white/20">
+                        {/* Decorative background element */}
+                        <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl -mr-20 -mt-20 pointer-events-none"></div>
+
+                        {/* Glassmorphic Header */}
+                        <div className="relative px-6 py-5 sm:px-10 sm:py-8 border-b border-gray-50 flex justify-between items-center bg-white/80 backdrop-blur-md shrink-0 z-10">
+                            <div className="flex items-center gap-4">
+                                <div className="p-3 bg-primary rounded-2xl shadow-lg shadow-primary/20">
+                                    <Plus className="text-white w-5 h-5 stroke-[3]" />
+                                </div>
+                                <div>
+                                    <h2 className="text-xl sm:text-2xl font-black text-gray-900 tracking-tight">New Order</h2>
+                                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.2em] mt-0.5">Fill in the order details</p>
+                                </div>
+                            </div>
+                            <button 
+                                onClick={() => !isSubmitting && setIsModalOpen(false)} 
+                                className="group p-2 text-gray-400 hover:text-gray-900 transition-all bg-gray-50 hover:bg-gray-100 rounded-xl active:scale-90"
+                            >
+                                <X size={20} className="group-hover:rotate-90 transition-transform duration-300" />
                             </button>
                         </div>
 
                         <form onSubmit={handleSubmit} className="flex-1 flex flex-col overflow-hidden">
                             {/* Scrollable Content Area */}
-                            <div className="flex-1 overflow-y-auto p-4 sm:p-8 space-y-8 scrollbar-thin scrollbar-thumb-gray-200 bg-gray-50/30">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-[0.1em]">Order Date</label>
-                                        <input
-                                            type="date"
-                                            required
-                                            value={formData.orderDate}
-                                            onChange={(e) => setFormData({ ...formData, orderDate: e.target.value })}
-                                            className="w-full px-4 py-2.5 bg-white border border-gray-200 rounded focus:ring-primary focus:border-primary"
-                                        />
+                            <div className="flex-1 overflow-y-auto p-6 sm:p-10 space-y-10 custom-scrollbar bg-slate-50">
+                                {/* Order Metadata Section */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 sm:gap-8">
+                                    <div className="space-y-2">
+                                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Order Date</label>
+                                        <div className="relative">
+                                            <input
+                                                type="date"
+                                                required
+                                                value={formData.orderDate}
+                                                onChange={(e) => setFormData({ ...formData, orderDate: e.target.value })}
+                                                className="w-full px-5 py-3.5 bg-white border border-slate-200 rounded-2xl focus:ring-4 focus:ring-primary/5 focus:border-primary outline-none text-sm font-semibold shadow-sm transition-all"
+                                            />
+                                        </div>
                                     </div>
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-[0.1em]">Client Name</label>
+                                    <div className="space-y-2 lg:col-span-1">
+                                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Client Selection</label>
                                         <SearchableDropdown
                                             value={formData.clientName}
                                             onChange={(val) => setFormData({ ...formData, clientName: val })}
                                             options={clients}
-                                            placeholder="Select Client"
+                                            placeholder="Choose Client"
                                             showAll={false}
                                         />
                                     </div>
-                                    <div className="space-y-1.5">
-                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-[0.1em]">Godown Name</label>
+                                    <div className="space-y-2 lg:col-span-1">
+                                        <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest ml-1">Location / Godown</label>
                                         <SearchableDropdown
                                             value={formData.godownName}
                                             onChange={(val) => setFormData({ ...formData, godownName: val })}
@@ -605,101 +652,118 @@ const Order = () => {
                                     </div>
                                 </div>
 
+                                {/* Items Section */}
                                 <div className="space-y-6">
-                                    <div className="flex justify-between items-center pb-2 border-b-2 border-primary/10">
-                                        <h3 className="text-primary uppercase tracking-[0.2em] flex items-center gap-2">
-                                            <div className="w-1.5 h-1.5 rounded bg-primary animate-pulse" />
-                                            Items Detail
+                                    <div className="flex items-center gap-4 mb-2">
+                                        <div className="h-[2px] flex-1 bg-gradient-to-r from-transparent via-gray-100 to-transparent"></div>
+                                        <h3 className="text-[11px] font-black text-primary uppercase tracking-[0.3em] flex items-center gap-3">
+                                            <span className="w-2 h-2 rounded-full bg-primary shadow-[0_0_10px_rgba(88,204,2,0.5)]"></span>
+                                            Line Items
+                                            <span className="px-2 py-0.5 bg-primary/10 rounded-lg text-[9px]">{formData.items.length}</span>
                                         </h3>
+                                        <div className="h-[2px] flex-1 bg-gradient-to-r from-transparent via-gray-100 to-transparent"></div>
                                     </div>
 
-                                    <div className="space-y-4">
+                                    <div className="space-y-5">
                                         {formData.items.map((item, index) => (
-                                            <div key={index} className="group relative flex flex-col gap-5 p-5 bg-white border border-gray-100 rounded-[2rem] shadow-sm hover:shadow-xl hover:shadow-primary/5 transition-all duration-300 focus-within:z-40">
-                                                <div className="absolute top-0 left-0 w-1.5 h-full bg-primary opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                                                <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 items-end">
-                                                    <div className="sm:col-span-6">
-                                                        <label className="text-[9px] font-black text-gray-400 mb-1.5 uppercase tracking-widest block">Item Name</label>
-                                                        <SearchableDropdown
-                                                            value={item.itemName}
-                                                            onChange={(val) => handleItemChange(index, 'itemName', val)}
-                                                            options={itemNames}
-                                                            placeholder="Select Item"
-                                                            showAll={false}
-                                                        />
+                                            <div 
+                                                key={index} 
+                                                className="group relative animate-in slide-in-from-right-10 duration-300"
+                                                style={{ animationDelay: `${index * 50}ms` }}
+                                            >
+                                                <div className="relative flex flex-col gap-6 p-6 sm:p-8 bg-white border border-slate-200/60 sm:rounded-[2rem] shadow-sm hover:border-primary/40 hover:shadow-lg hover:shadow-primary/10 transition-all duration-500">
+                                                    {/* Index Marker */}
+                                                    <div className="absolute -left-3 top-1/2 -translate-y-1/2 hidden sm:flex items-center justify-center w-6 h-6 bg-slate-50 text-[10px] font-black text-slate-400 rounded-full border border-slate-200 group-hover:bg-primary group-hover:text-white group-hover:border-primary transition-all duration-500">
+                                                        {index + 1}
                                                     </div>
-                                                    <div className="sm:col-span-3">
-                                                        <label className="text-[9px] font-black text-gray-400 mb-1.5 uppercase tracking-widest block">Rate</label>
-                                                        <input
-                                                            type="number"
-                                                            required
-                                                            placeholder="0.00"
-                                                            value={item.rate}
-                                                            onChange={(e) => handleItemChange(index, 'rate', e.target.value)}
-                                                            className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded focus:ring-primary focus:bg-white outline-none text-sm font-medium transition-all"
-                                                        />
-                                                    </div>
-                                                    <div className="sm:col-span-3 flex gap-3 items-center">
-                                                        <div className="flex-1">
-                                                            <label className="text-[9px] font-black text-gray-400 mb-1.5 uppercase tracking-widest block">Qty</label>
+
+                                                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-6 items-end">
+                                                        <div className="sm:col-span-6">
+                                                            <label className="text-[9px] font-black text-slate-500 mb-2 uppercase tracking-widest block ml-1">Product / Item Name</label>
+                                                            <SearchableDropdown
+                                                                value={item.itemName}
+                                                                onChange={(val) => handleItemChange(index, 'itemName', val)}
+                                                                options={itemNames}
+                                                                placeholder="Select Product"
+                                                                showAll={false}
+                                                            />
+                                                        </div>
+                                                        <div className="sm:col-span-3">
+                                                            <label className="text-[9px] font-black text-slate-500 mb-2 uppercase tracking-widest block ml-1">Unit Price (₹)</label>
                                                             <input
                                                                 type="number"
                                                                 required
-                                                                placeholder="0"
-                                                                value={item.qty}
-                                                                onChange={(e) => handleItemChange(index, 'qty', e.target.value)}
-                                                                className="w-full px-4 py-2.5 bg-gray-50 border border-gray-200 rounded focus:ring-primary focus:bg-white outline-none text-sm font-bold text-primary transition-all"
+                                                                placeholder="0.00"
+                                                                value={item.rate}
+                                                                onChange={(e) => handleItemChange(index, 'rate', e.target.value)}
+                                                                className="w-full px-5 py-3.5 bg-white border border-slate-200 rounded-2xl focus:ring-4 focus:ring-primary/5 focus:border-primary outline-none text-sm font-semibold transition-all shadow-sm"
                                                             />
                                                         </div>
-                                                        {formData.items.length > 1 && (
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => handleRemoveItem(index)}
-                                                                className="mt-5 p-2.5 text-red-500 hover:text-white transition-all bg-red-50 hover:bg-red-500 rounded shadow-inner group-hover:rotate-90 transition-transform duration-300"
-                                                            >
-                                                                <X size={18} />
-                                                            </button>
-                                                        )}
+                                                        <div className="sm:col-span-3 flex gap-4 items-end">
+                                                            <div className="flex-1">
+                                                                <label className="text-[9px] font-black text-slate-500 mb-2 uppercase tracking-widest block ml-1">Quantity</label>
+                                                                <input
+                                                                    type="number"
+                                                                    required
+                                                                    placeholder="0"
+                                                                    value={item.qty}
+                                                                    onChange={(e) => handleItemChange(index, 'qty', e.target.value)}
+                                                                    className="w-full px-5 py-3.5 bg-white border border-primary/20 rounded-2xl focus:ring-4 focus:ring-primary/5 focus:border-primary outline-none text-sm font-black text-primary transition-all text-center shadow-sm"
+                                                                />
+                                                            </div>
+                                                            {formData.items.length > 1 && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => handleRemoveItem(index)}
+                                                                    className="shrink-0 p-3.5 text-red-400 hover:text-white transition-all bg-red-50/50 hover:bg-red-500 rounded-2xl active:scale-90 border border-red-100 mb-[1px]"
+                                                                    title="Remove Item"
+                                                                >
+                                                                    <X size={18} />
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
                                         ))}
                                     </div>
 
-                                    {/* Add Item Button at Bottom */}
-                                    <div className="flex justify-center pt-2">
+                                    {/* Action Buttons Inside Scroll Area */}
+                                    <div className="flex justify-center pt-4">
                                         <button
                                             type="button"
                                             onClick={handleAddItem}
-                                            className="group flex items-center gap-2 px-8 py-3 bg-white border-2 border-dashed border-primary/30 text-primary hover:border-primary hover:bg-primary/5 transition-all rounded-[1.5rem] font-black text-xs uppercase tracking-[0.15em]"
+                                            className="group flex items-center gap-3 px-8 py-4 bg-white border-2 border-dashed border-gray-200 text-gray-400 hover:border-primary hover:text-primary hover:bg-primary/5 transition-all rounded-3xl font-black text-[10px] uppercase tracking-widest"
                                         >
-                                            <Plus size={16} className="group-hover:rotate-90 transition-transform duration-300" />
+                                            <div className="p-1 bg-gray-50 group-hover:bg-primary/20 rounded-lg transition-colors">
+                                                <Plus size={14} className="group-hover:rotate-90 transition-transform duration-500" />
+                                            </div>
                                             Add Another Item
                                         </button>
                                     </div>
                                 </div>
                             </div>
 
-                            {/* Fixed Footer */}
-                            <div className="p-4 sm:p-6 border-t border-gray-100 bg-white flex flex-col-reverse sm:flex-row justify-end gap-4 shrink-0 z-30 shadow-[0_-10px_40px_rgba(0,0,0,0.02)]">
+                            {/* Glassmorphic Footer */}
+                            <div className="px-6 py-6 sm:px-10 sm:py-8 border-t border-gray-100 bg-white/80 backdrop-blur-md flex flex-col sm:flex-row justify-end items-center gap-4 shrink-0 z-10">
                                 <button
                                     type="button"
-                                    onClick={() => setIsModalOpen(false)}
-                                    className="px-10 py-3 bg-white border-2 border-gray-100 text-gray-400 rounded hover:bg-gray-50 hover:text-gray-600 hover:border-gray-200 transition-all font-black text-[11px] uppercase tracking-[0.2em]"
+                                    onClick={() => !isSubmitting && setIsModalOpen(false)}
+                                    className="w-full sm:w-auto px-10 py-4 bg-gray-50 text-gray-400 rounded-2xl hover:bg-gray-100 hover:text-gray-900 transition-all font-black text-[10px] uppercase tracking-widest active:scale-95"
                                 >
-                                    Cancel
+                                    Discard Changes
                                 </button>
                                 <button
                                     type="submit"
                                     disabled={isSubmitting}
-                                    className={`flex items-center justify-center gap-3 px-10 py-3 bg-primary text-white rounded hover:bg-primary-hover transition-all font-black text-[11px] uppercase tracking-[0.2em] shadow-2xl shadow-primary/30 active:scale-95 ${isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    className="w-full sm:w-auto min-w-[200px] flex items-center justify-center gap-3 px-10 py-4 bg-primary text-white rounded-2xl hover:bg-primary-hover transition-all font-black text-[10px] uppercase tracking-widest shadow-[0_15px_30px_rgba(88,204,2,0.3)] hover:shadow-[0_20px_40px_rgba(88,204,2,0.4)] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
                                     {isSubmitting ? (
-                                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded animate-spin" />
+                                        <RefreshCw size={18} className="animate-spin" />
                                     ) : (
-                                        <Save size={18} />
+                                        <Save size={18} className="stroke-[3]" />
                                     )}
-                                    {isSubmitting ? 'Saving...' : 'Save Order'}
+                                    {isSubmitting ? 'Confirming Order...' : 'Submit Order'}
                                 </button>
                             </div>
                         </form>
@@ -708,6 +772,19 @@ const Order = () => {
             )}
 
             <style>{`
+                .custom-scrollbar::-webkit-scrollbar {
+                    width: 6px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-track {
+                    background: transparent;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb {
+                    background: #e5e7eb;
+                    border-radius: 10px;
+                }
+                .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+                    background: #d1d5db;
+                }
                 @keyframes spin-slow {
                     from { transform: rotate(0deg); }
                     to { transform: rotate(-360deg); }
@@ -721,6 +798,11 @@ const Order = () => {
                 }
                 .animate-fade-in-up {
                     animation: fade-in-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+                }
+                
+                /* Lucide stroke width fix */
+                .stroke-\[3\] {
+                    stroke-width: 3px;
                 }
             `}</style>
         </div>

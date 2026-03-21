@@ -241,7 +241,7 @@ const InformToPartyBeforeDispatch = () => {
             });
 
             showToast('Confirmation saved to "Before Dispatch" sheet successfully!', 'success');
-            
+
             // Clear selected rows and refresh data
             setSelectedRows({});
             handleRefresh();
