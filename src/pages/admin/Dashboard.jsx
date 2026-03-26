@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   FileText,
   Truck,
@@ -8,13 +8,10 @@ import {
   Clock,
   CheckCircle,
   BellRing,
-  AlertCircle,
   Activity,
   RefreshCw,
-  Loader2,
   Send,
   CheckCircle2,
-  Calendar
 } from "lucide-react";
 import {
   Chart as ChartJS,
@@ -26,11 +23,12 @@ import {
   Tooltip,
   Legend,
   Filler,
-} from 'chart.js';
-import { Line } from 'react-chartjs-2';
-import { useDataSync } from '../../utils/useDataSync';
-import { useToast } from '../../contexts/ToastContext';
+} from "chart.js";
+import { Line } from "react-chartjs-2";
+import { useDataSync } from "../../utils/useDataSync";
+import { useToast } from "../../contexts/ToastContext";
 
+// Register ChartJS components
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -42,16 +40,18 @@ ChartJS.register(
   Filler
 );
 
+// Environment variables
 const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
 const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
 
-const CACHE_KEY = 'dashboardAnalyticsData';
-const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
+// Cache duration (10 minutes)
+const CACHE_DURATION = 10 * 60 * 1000;
 
+// --- Helper: safely get value from object using multiple possible keys ---
 const getVal = (obj, ...possibleKeys) => {
-  if (!obj || typeof obj !== 'object') return null;
+  if (!obj || typeof obj !== "object") return null;
   for (const key of possibleKeys) {
-    if (typeof key === 'number') {
+    if (typeof key === "number") {
       const vals = Object.values(obj);
       if (vals[key] !== undefined) return vals[key];
     } else if (obj[key] !== undefined) {
@@ -61,8 +61,89 @@ const getVal = (obj, ...possibleKeys) => {
   return null;
 };
 
+// --- Helper: parse number safely ---
+const safeNumber = (val) => {
+  const num = parseFloat(val);
+  return isNaN(num) ? 0 : num;
+};
+
+// --- Fetcher for ORDER sheet (identical to DispatchPlanning) ---
+const fetchOrderSheet = async (signal) => {
+  const url = new URL(API_URL);
+  url.searchParams.set("sheet", "ORDER");
+  url.searchParams.set("mode", "table");
+  if (SHEET_ID) url.searchParams.set("sheetId", SHEET_ID);
+
+  const response = await fetch(url.toString(), { signal });
+  const result = await response.json();
+
+  if (!result.success) return [];
+
+  const data = result.data.slice(4); // skip header rows
+  return data
+    .map((item, index) => ({
+      ...item,
+      originalIndex: index,
+      orderNo: item.orderNumber,
+      qty: item.qty || 0,
+      planningPendingQty: getVal(item, "planningPendingQty", "Planning Pending Qty", 12) || 0,
+    }))
+    .filter((item) => {
+      const hasQ =
+        item.columnQ !== undefined &&
+        item.columnQ !== null &&
+        String(item.columnQ).trim() !== "";
+      const hasR =
+        item.columnR !== undefined &&
+        item.columnR !== null &&
+        String(item.columnR).trim() !== "";
+      const pendingQty = safeNumber(item.planningPendingQty);
+      return hasQ && !hasR && pendingQty > 0;
+    });
+};
+
+// --- Fetcher for Planning sheet ---
+const fetchPlanningSheet = async (signal) => {
+  const url = new URL(API_URL);
+  url.searchParams.set("sheet", "Planning");
+  url.searchParams.set("mode", "table");
+  if (SHEET_ID) url.searchParams.set("sheetId", SHEET_ID);
+
+  const response = await fetch(url.toString(), { signal });
+  const result = await response.json();
+
+  if (!result.success) return [];
+
+  const data = result.data.slice(3); // skip header rows
+  return data.map((item) => ({
+    ...item,
+    orderNo: item.orderNumber || item.orderNo,
+  }));
+};
+
+// --- Main Dashboard Component ---
 const Dashboard = () => {
   const { showToast } = useToast();
+
+  // Data sync hooks invoked directly in the component
+  const {
+    data: orders,
+    loading: loadingOrders,
+    refreshing: refreshingOrders,
+    refresh: refreshOrders,
+  } = useDataSync("Dashboard Orders", fetchOrderSheet, "dashboardOrders", CACHE_DURATION);
+
+  const {
+    data: planningData,
+    loading: loadingPlanning,
+    refreshing: refreshingPlanning,
+    refresh: refreshPlanning,
+  } = useDataSync("Dashboard Planning", fetchPlanningSheet, "dashboardPlanning", CACHE_DURATION);
+
+  const loading = loadingOrders || loadingPlanning;
+  const refreshing = refreshingOrders || refreshingPlanning;
+
+  // State for stats and chart data
   const [stats, setStats] = useState({
     orderQtySum: 0,
     cancelQtySum: 0,
@@ -75,124 +156,122 @@ const Dashboard = () => {
     pendingCompletion: 0,
     completedCompletion: 0,
     pendingPostNotify: 0,
-    fullyCompleted: 0
+    fullyCompleted: 0,
   });
-
-  // New state for timeline chart (Monthly trends)
-  const [allMonthlyMap, setAllMonthlyMap] = useState({ months: [], clientData: new Map() });
-  // New state for godown load (from Planning sheet)
+  const [allMonthlyMap, setAllMonthlyMap] = useState({
+    months: [],
+    clientData: new Map(),
+  });
   const [godownLoad, setGodownLoad] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState("");
 
-  // --- Fetcher for ORDER sheet ---
-  const fetchOrderSheet = useCallback(async () => {
-    const url = new URL(API_URL);
-    url.searchParams.set('sheet', 'ORDER');
-    url.searchParams.set('mode', 'table');
-    if (SHEET_ID) url.searchParams.set('sheetId', SHEET_ID);
-    
-    const res = await fetch(url.toString());
-    const result = await res.json();
-    if (result.success && Array.isArray(result.data)) return result.data.slice(5);
-    throw new Error('Failed to fetch ORDER data');
-  }, []);
+  // Helper: count pending/completed based on column presence
+  const countStage = (items, pendingCol, completedCols) => {
+    let pending = 0;
+    let completed = 0;
+    const compCols = Array.isArray(completedCols) ? completedCols : [completedCols];
 
-  // --- Fetcher for Planning sheet ---
-  const fetchPlanningSheet = useCallback(async () => {
-    const url = new URL(API_URL);
-    url.searchParams.set('sheet', 'Planning');
-    url.searchParams.set('mode', 'table');
-    if (SHEET_ID) url.searchParams.set('sheetId', SHEET_ID);
-    
-    const res = await fetch(url.toString());
-    const result = await res.json();
-    if (result.success && Array.isArray(result.data)) return result.data.slice(3);
-    throw new Error('Failed to fetch Planning data');
-  }, []);
+    items.forEach((item) => {
+      const isCompleted = compCols.every((col) => {
+        const val = getVal(item, col);
+        return val !== undefined && val !== null && String(val).trim() !== "";
+      });
 
-  // --- Data Sync Hooks ---
-  const { 
-    data: orderData, 
-    loading: loadingOrders, 
-    refreshing: refreshingOrders, 
-    refresh: refreshOrders 
-  } = useDataSync('Dashboard Orders', fetchOrderSheet, 'dashboardOrders', CACHE_DURATION);
+      if (isCompleted) {
+        completed++;
+      } else {
+        pending++;
+      }
+    });
+    return { pending, completed };
+  };
 
-  const { 
-    data: planningData, 
-    loading: loadingPlanning, 
-    refreshing: refreshingPlanning, 
-    refresh: refreshPlanning 
-  } = useDataSync('Dashboard Planning', fetchPlanningSheet, 'dashboardPlanning', CACHE_DURATION);
-
-  const loading = loadingOrders || loadingPlanning;
-  const refreshing = refreshingOrders || refreshingPlanning;
-
-  // Derive stats when data changes
+  // Process orders data when it changes
   useEffect(() => {
-    if (!orderData) return;
+    if (!orders) return;
 
     // Sums for cards
-    const orderQtySum = orderData.reduce((sum, item) => sum + safeNumber(getVal(item, 'planningQty', 10)), 0);
-    const cancelQtySum = orderData.reduce((sum, item) => sum + safeNumber(item.cancelQty), 0);
-    const remainingQtySum = orderData.reduce((sum, item) => {
-      const val = safeNumber(getVal(item, 'planningPendingQty', 11));
-      return sum + (val > 0 ? val : 0);
-    }, 0);
-    const deliveredQtySum = orderData.reduce((sum, item) => sum + safeNumber(item.qtyDelivered), 0);
+    const orderQtySum = orders.reduce(
+      (sum, item) => sum + safeNumber(getVal(item, "planningQty")),
+      0
+    );
+    const cancelQtySum = orders.reduce(
+      (sum, item) => sum + safeNumber(getVal(item, "cancelQty")),
+      0
+    );
+    const remainingQtySum = orders.reduce(
+      (sum, item) => sum + safeNumber(getVal(item, "planningPendingQty")),
+      0
+    );
+    const deliveredQtySum = orders.reduce(
+      (sum, item) => sum + safeNumber(getVal(item, "qtyDelivered")),
+      0
+    );
 
-    // Stage 1 counts (columns Q & R)
-    const stage1 = countStage(orderData, 'columnQ', 'columnR');
+    // Stage 1: columns Q & R
+    const stage1 = countStage(orders, "columnQ", "columnR");
 
-    // Build monthly trends
+    // Build monthly client data: Map<client, Map<monthKey, stats>>
     const monthlyMap = new Map();
-    orderData.forEach(order => {
-      if (order.orderDate && order.orderDate !== "-") {
-        const date = new Date(order.orderDate);
+
+    orders.forEach((order) => {
+      const dateStr = order.orderDate;
+      if (dateStr && dateStr !== "-") {
+        const date = new Date(dateStr);
         if (!isNaN(date.getTime())) {
-          const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+          const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
+            2,
+            "0"
+          )}`;
           const client = (order.clientName || "Unknown").trim();
           const qty = safeNumber(order.qty);
 
-          if (!monthlyMap.has(monthKey)) {
-            monthlyMap.set(monthKey, new Map());
+          if (!monthlyMap.has(client)) {
+            monthlyMap.set(client, new Map());
           }
-          const clientMonthMap = monthlyMap.get(monthKey);
-          const data = clientMonthMap.get(client) || {
+          const clientMonthMap = monthlyMap.get(client);
+          const data = clientMonthMap.get(monthKey) || {
             qty: 0,
             planningQty: 0,
             remainingQty: 0,
             deliveredQty: 0,
             cancelQty: 0,
-            completedCount: 0
+            completedCount: 0,
           };
 
           data.qty += qty;
-          data.planningQty += safeNumber(getVal(order, 'planningQty', 10));
-          data.remainingQty += safeNumber(getVal(order, 'planningPendingQty', 11));
-          data.deliveredQty += safeNumber(getVal(order, 'qtyDelivered', 12));
-          data.cancelQty += safeNumber(getVal(order, 'cancelQty', 13));
+          data.planningQty += safeNumber(getVal(order, "planningQty"));
+          data.remainingQty += safeNumber(getVal(order, "planningPendingQty", "Planning Pending Qty", 12));
+          data.deliveredQty += safeNumber(getVal(order, "qtyDelivered"));
+          data.cancelQty += safeNumber(getVal(order, "cancelQty"));
 
-          const status = String(getVal(order, 'dispatchStatus', 14) || '').toLowerCase();
-          if (status.includes('complete')) {
+          // Completed if column R is not empty
+          if (order.columnR && String(order.columnR).trim() !== "") {
             data.completedCount++;
           }
 
-          clientMonthMap.set(client, data);
+          clientMonthMap.set(monthKey, data);
         }
       }
     });
 
-    // Sorted months
-    const rawMonths = Array.from(monthlyMap.keys()).sort();
+    // Extract all unique month keys for continuous timeline
+    const allMonths = new Set();
+    monthlyMap.forEach(monthMap => {
+      monthMap.keys().forEach(m => allMonths.add(m));
+    });
+    const rawMonths = Array.from(allMonths).sort();
     let sortedMonths = [];
     if (rawMonths.length > 0) {
       try {
-        const start = new Date(rawMonths[0] + '-01');
-        const end = new Date(rawMonths[rawMonths.length - 1] + '-01');
+        const start = new Date(rawMonths[0] + "-01");
+        const end = new Date(rawMonths[rawMonths.length - 1] + "-01");
         let current = new Date(start);
         while (current <= end) {
-          const mKey = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}`;
+          const mKey = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(
+            2,
+            "0"
+          )}`;
           sortedMonths.push(mKey);
           current.setMonth(current.getMonth() + 1);
         }
@@ -202,38 +281,40 @@ const Dashboard = () => {
     }
 
     setAllMonthlyMap({ months: sortedMonths, clientData: monthlyMap });
-    setStats(prev => ({
+    setStats((prev) => ({
       ...prev,
       orderQtySum,
       cancelQtySum,
       remainingQtySum,
       deliveredQtySum,
       pendingPlanning: stage1.pending,
-      completedPlanning: stage1.completed
+      completedPlanning: stage1.completed,
     }));
-  }, [orderData]);
+  }, [orders]);
 
-  // Derive planning stats
+  // Process planning data when it changes
   useEffect(() => {
     if (!planningData) return;
 
-    const stage2 = countStage(planningData, 'columnK', 'columnL');
-    const stage3 = countStage(planningData, 'columnO', ['columnO', 'columnP']);
-    const stage4 = countStage(planningData, 'columnT', ['columnT', 'columnU']);
+    // Stages based on columns (same as in DispatchPlanning)
+    const stage2 = countStage(planningData, "columnK", "columnL");
+    const stage3 = countStage(planningData, "columnO", "columnP");
+    const stage4 = countStage(planningData, "columnT", "columnU");
 
-    setStats(prev => ({
+    setStats((prev) => ({
       ...prev,
       pendingNotification: stage2.pending,
       completedNotification: stage2.completed,
       pendingCompletion: stage3.pending,
       completedCompletion: stage3.completed,
       pendingPostNotify: stage4.pending,
-      fullyCompleted: stage4.completed
+      fullyCompleted: stage4.completed,
     }));
 
+    // Godown load
     const godownMap = new Map();
-    planningData.forEach(item => {
-      const godown = item.godownName || 'Unassigned';
+    planningData.forEach((item) => {
+      const godown = item.godownName || "Unassigned";
       const qty = safeNumber(item.dispatchQty);
       if (qty > 0) {
         godownMap.set(godown, (godownMap.get(godown) || 0) + qty);
@@ -246,125 +327,106 @@ const Dashboard = () => {
     setGodownLoad(godownArray);
   }, [planningData]);
 
-  const safeNumber = (val) => {
-    const num = parseFloat(val);
-    return isNaN(num) ? 0 : num;
-  };
-
-  const countStage = (items, pendingCol, completedCols) => {
-    let pending = 0;
-    let completed = 0;
-    const compCols = Array.isArray(completedCols) ? completedCols : [completedCols];
-
-    items.forEach(item => {
-      const isCompleted = compCols.every(col => (item[col] || '').toString().trim() !== '');
-
-      if (isCompleted) {
-        completed++;
-      } else {
-        pending++;
-      }
-    });
-    return { pending, completed };
-  };
-
-  // Helper to extract date part (YYYY-MM-DD) from various date formats
-  const extractDateKey = (dateStr) => {
-    if (!dateStr || dateStr === '-') return null;
-    try {
-      const date = new Date(dateStr);
-      if (isNaN(date.getTime())) return null;
-      const yyyy = date.getFullYear();
-      const mm = String(date.getMonth() + 1).padStart(2, '0');
-      const dd = String(date.getDate()).padStart(2, '0');
-      return `${yyyy}-${mm}-${dd}`;
-    } catch {
-      return null;
-    }
-  };
-
   const handleRefresh = useCallback(() => {
     refreshOrders();
     refreshPlanning();
   }, [refreshOrders, refreshPlanning]);
 
-  // Reactive Chart Data Construction – Handles 1000s of clients professionally
-  const monthlyTrendData = React.useMemo(() => {
+  // Build chart data
+  const monthlyTrendData = useMemo(() => {
     const { months, clientData } = allMonthlyMap;
     if (months.length === 0) return { labels: [], datasets: [] };
 
-    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    const displayLabels = months.map(m => {
-      const [y, mm] = m.split('-');
+    const monthNames = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ];
+    const displayLabels = months.map((m) => {
+      const [y, mm] = m.split("-");
       return `${monthNames[parseInt(mm) - 1]} ${y}`;
     });
 
     const colors = [
-      'rgba(88, 204, 2, 1)',   // Primary Green
-      'rgba(22, 163, 74, 1)',   // Green
-      'rgba(37, 99, 235, 1)',   // Blue
-      'rgba(147, 51, 234, 1)',  // Purple
-      'rgba(245, 158, 11, 1)',  // Amber
-      'rgba(107, 114, 128, 1)'  // Gray (for Others)
+      "rgba(88, 204, 2, 1)", // Primary Green
+      "rgba(22, 163, 74, 1)", // Green
+      "rgba(37, 99, 235, 1)", // Blue
+      "rgba(147, 51, 234, 1)", // Purple
+      "rgba(245, 158, 11, 1)", // Amber
+      "rgba(107, 114, 128, 1)", // Gray (Others)
     ];
 
-    let datasets = [];
     const isSearching = searchTerm.trim().length > 0;
+    let datasets = [];
 
     if (isSearching) {
-      // Find all matching clients
+      // Show top matches (up to 8)
       const matches = Array.from(clientData.entries())
         .filter(([name]) => name.toLowerCase().includes(searchTerm.toLowerCase()))
-        .sort((a, b) => { // Sort by total volume within matches
-          const aT = Array.from(a[1].values()).reduce((sum, d) => sum + d.qty, 0);
-          const bT = Array.from(b[1].values()).reduce((sum, d) => sum + d.qty, 0);
-          return bT - aT;
+        .sort((a, b) => {
+          const aTotal = Array.from(a[1].values()).reduce((sum, d) => sum + d.qty, 0);
+          const bTotal = Array.from(b[1].values()).reduce((sum, d) => sum + d.qty, 0);
+          return bTotal - aTotal;
         })
-        .slice(0, 8); // Performance cap: show top 8 matching results
+        .slice(0, 8);
 
       datasets = matches.map(([name, dataMap], idx) => ({
         label: name,
-        data: months.map(m => (dataMap.get(m) || { planningQty: 0 }).planningQty),
-        extra: months.map(m => dataMap.get(m) || { qty: 0, planningQty: 0, remainingQty: 0, deliveredQty: 0, cancelQty: 0, completedCount: 0 }),
+        data: months.map((m) => (dataMap.get(m) || { planningQty: 0 }).planningQty),
+        extra: months.map((m) => dataMap.get(m) || {}),
         borderColor: colors[idx % 5],
-        backgroundColor: colors[idx % 5].replace('1)', '0.1)'),
+        backgroundColor: colors[idx % 5].replace("1)", "0.1)"),
         fill: true,
         tension: 0.4,
         pointRadius: 4,
         pointHoverRadius: 6,
-        pointBackgroundColor: '#fff',
+        pointBackgroundColor: "#fff",
         pointBorderWidth: 2,
       }));
     } else {
-      // DEFAULT: Top 5 + Others aggregation
-      const sortedClients = Array.from(clientData.entries())
-        .sort((a, b) => {
-          const aTotal = Array.from(a[1].values()).reduce((sum, d) => sum + d.planningQty, 0);
-          const bTotal = Array.from(b[1].values()).reduce((sum, d) => sum + d.planningQty, 0);
-          return bTotal - aTotal;
-        });
+      // Top 5 + Others
+      const sortedClients = Array.from(clientData.entries()).sort((a, b) => {
+        const aTotal = Array.from(a[1].values()).reduce((sum, d) => sum + d.planningQty, 0);
+        const bTotal = Array.from(b[1].values()).reduce((sum, d) => sum + d.planningQty, 0);
+        return bTotal - aTotal;
+      });
 
       const top5 = sortedClients.slice(0, 5);
       const remaining = sortedClients.slice(5);
 
       datasets = top5.map(([name, dataMap], idx) => ({
         label: name,
-        data: months.map(m => (dataMap.get(m) || { planningQty: 0 }).planningQty),
-        extra: months.map(m => dataMap.get(m) || { qty: 0, planningQty: 0, remainingQty: 0, deliveredQty: 0, cancelQty: 0, completedCount: 0 }),
+        data: months.map((m) => (dataMap.get(m) || { planningQty: 0 }).planningQty),
+        extra: months.map((m) => dataMap.get(m) || {}),
         borderColor: colors[idx % 5],
-        backgroundColor: colors[idx % 5].replace('1)', '0.1)'),
+        backgroundColor: colors[idx % 5].replace("1)", "0.1)"),
         fill: true,
         tension: 0.4,
         pointRadius: 4,
         pointHoverRadius: 6,
-        pointBackgroundColor: '#fff',
+        pointBackgroundColor: "#fff",
         pointBorderWidth: 2,
       }));
 
       if (remaining.length > 0) {
-        // Aggregate all "Others" data points per month
-        const othersData = months.map(m => {
-          let summary = { qty: 0, planningQty: 0, remainingQty: 0, deliveredQty: 0, cancelQty: 0, completedCount: 0 };
+        const othersData = months.map((m) => {
+          let summary = {
+            qty: 0,
+            planningQty: 0,
+            remainingQty: 0,
+            deliveredQty: 0,
+            cancelQty: 0,
+            completedCount: 0,
+          };
           remaining.forEach(([_, dataMap]) => {
             const d = dataMap.get(m);
             if (d) {
@@ -381,10 +443,10 @@ const Dashboard = () => {
 
         datasets.push({
           label: `Others (${remaining.length} clients)`,
-          data: othersData.map(d => d.planningQty),
+          data: othersData.map((d) => d.planningQty),
           extra: othersData,
           borderColor: colors[5],
-          backgroundColor: colors[5].replace('1)', '0.1)'),
+          backgroundColor: colors[5].replace("1)", "0.1)"),
           fill: true,
           tension: 0.4,
           pointRadius: 2,
@@ -397,12 +459,17 @@ const Dashboard = () => {
     return { labels: displayLabels, datasets };
   }, [allMonthlyMap, searchTerm]);
 
+  // --- Stat Card Component ---
   const StatCard = ({ title, value, icon: Icon, color, bgColor }) => (
     <div className="bg-white rounded border border-gray-100/50 p-5 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 group">
       <div className="flex items-start justify-between">
         <div>
-          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 group-hover:text-gray-500 transition-colors">{title}</p>
-          <h3 className="text-2xl font-black text-[#58cc02] group-hover:scale-105 transition-transform origin-left">{value}</h3>
+          <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 group-hover:text-gray-500 transition-colors">
+            {title}
+          </p>
+          <h3 className="text-2xl font-black text-[#58cc02] group-hover:scale-105 transition-transform origin-left">
+            {value}
+          </h3>
         </div>
         <div className={`p-3 rounded ${bgColor} group-hover:scale-110 transition-transform duration-300`}>
           <Icon className={`w-6 h-6 ${color}`} />
@@ -411,32 +478,35 @@ const Dashboard = () => {
     </div>
   );
 
+  // --- Workflow Stage Card Component ---
   const WorkflowStageCard = ({ title, pending, completed, icon: Icon, color, bgColor, stage }) => {
     const total = completed + pending;
     const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
-    
-    // Improved color mapping for gradients and shadows
+
     const colorClasses = {
-      'text-blue-600': 'from-blue-500 to-blue-400 shadow-blue-500/20',
-      'text-primary': 'from-[#58cc02] to-[#86efac] shadow-[#58cc02]/20',
-      'text-orange-600': 'from-orange-500 to-orange-400 shadow-orange-500/20',
-      'text-red-600': 'from-red-500 to-red-400 shadow-red-500/20'
+      "text-blue-600": "from-blue-500 to-blue-400 shadow-blue-500/20",
+      "text-primary": "from-[#58cc02] to-[#86efac] shadow-[#58cc02]/20",
+      "text-orange-600": "from-orange-500 to-orange-400 shadow-orange-500/20",
+      "text-red-600": "from-red-500 to-red-400 shadow-red-500/20",
     };
-    
-    const barColorClass = colorClasses[color] || 'from-primary to-green-400 shadow-primary/20';
+    const barColorClass = colorClasses[color] || "from-primary to-green-400 shadow-primary/20";
 
     return (
       <div className="bg-white rounded border border-gray-100/50 p-5 shadow-sm hover:shadow-lg hover:ring-1 hover:ring-primary/20 transition-all duration-300 group relative overflow-hidden">
-        {/* Decorative corner accent */}
-        <div className={`absolute top-0 right-0 w-24 h-24 -mr-8 -mt-8 rounded-full opacity-5 ${bgColor} group-hover:opacity-10 transition-opacity`} />
-        
+        <div
+          className={`absolute top-0 right-0 w-24 h-24 -mr-8 -mt-8 rounded-full opacity-5 ${bgColor} group-hover:opacity-10 transition-opacity`}
+        />
         <div className="flex items-center gap-3 mb-6 relative">
           <div className={`p-2.5 rounded ${bgColor} group-hover:rotate-12 transition-transform shadow-sm`}>
             <Icon className={`w-5 h-5 ${color}`} />
           </div>
           <div>
-            <h4 className="font-bold text-gray-900 text-sm group-hover:text-primary transition-colors">{title}</h4>
-            <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest">Stage {stage}</p>
+            <h4 className="font-bold text-gray-900 text-sm group-hover:text-primary transition-colors">
+              {title}
+            </h4>
+            <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest">
+              Stage {stage}
+            </p>
           </div>
         </div>
 
@@ -458,16 +528,19 @@ const Dashboard = () => {
         <div className="mt-auto space-y-3">
           <div className="flex justify-between items-end">
             <div className="flex flex-col">
-              <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Completion</span>
+              <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                Completion
+              </span>
               <span className={`text-lg font-black leading-none ${color}`}>{percentage}%</span>
             </div>
-            <div className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${bgColor} ${color} uppercase tracking-tighter shadow-sm border border-current opacity-70`}>
+            <div
+              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${bgColor} ${color} uppercase tracking-tighter shadow-sm border border-current opacity-70`}
+            >
               Efficiency
             </div>
           </div>
-          
+
           <div className="relative h-2.5 bg-gray-100 rounded-full overflow-hidden shadow-inner p-[2px]">
-            {/* Progress Bar with Gradient & Shimmer */}
             <div
               className={`h-full rounded-full bg-gradient-to-r ${barColorClass} transition-all duration-1000 ease-out shadow-lg relative`}
               style={{ width: `${percentage}%` }}
@@ -481,6 +554,7 @@ const Dashboard = () => {
     );
   };
 
+  // --- Loading Overlay ---
   if (loading) {
     return (
       <div className="h-[88vh] flex flex-col items-center justify-center bg-[#F5F5F5] transition-all duration-300">
@@ -490,8 +564,29 @@ const Dashboard = () => {
 
           <div className="relative">
             <svg className="w-20 h-20 animate-spin" viewBox="0 0 50 50">
-              <circle className="opacity-10" cx="25" cy="25" r="20" fill="none" stroke="currentColor" strokeWidth="3" style={{ color: 'var(--primary, #58cc02)' }} />
-              <circle className="opacity-100" cx="25" cy="25" r="20" fill="none" stroke="currentColor" strokeWidth="3" strokeDasharray="90" strokeDashoffset="70" strokeLinecap="round" style={{ color: 'var(--primary, #58cc02)' }} />
+              <circle
+                className="opacity-10"
+                cx="25"
+                cy="25"
+                r="20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                style={{ color: "var(--primary, #58cc02)" }}
+              />
+              <circle
+                className="opacity-100"
+                cx="25"
+                cy="25"
+                r="20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeDasharray="90"
+                strokeDashoffset="70"
+                strokeLinecap="round"
+                style={{ color: "var(--primary, #58cc02)" }}
+              />
             </svg>
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="h-3 w-3 bg-primary rounded-full animate-pulse shadow-[0_0_15px_rgba(88,204,2,0.6)]"></div>
@@ -502,7 +597,9 @@ const Dashboard = () => {
             <h3 className="text-xl font-black text-gray-800 uppercase tracking-[0.4em] mb-2 drop-shadow-sm flex items-center justify-center">
               Loading
               <span className="inline-flex ml-1">
-                <span className="animate-bounce" style={{ animationDelay: '0s' }}>.</span>
+                <span className="animate-bounce" style={{ animationDelay: "0s" }}>
+                  .
+                </span>
                 <span className="animate-bounce [animation-delay:0.2s] ml-0.5">.</span>
                 <span className="animate-bounce [animation-delay:0.4s] ml-0.5">.</span>
               </span>
@@ -516,6 +613,7 @@ const Dashboard = () => {
     );
   }
 
+  // --- Main Render ---
   return (
     <div className="min-h-screen bg-[#F5F5F5]">
       <div className="p-3 sm:p-6 space-y-6">
@@ -524,9 +622,13 @@ const Dashboard = () => {
           <div>
             <div className="flex items-center gap-2 mb-1">
               <div className="w-2 h-2 bg-primary rounded animate-pulse"></div>
-              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.2em]">Real-time Overview</span>
+              <span className="text-[10px] font-bold text-gray-400 uppercase tracking-[0.2em]">
+                Real-time Overview
+              </span>
             </div>
-            <h1 className="text-2xl lg:text-3xl font-black text-gray-900 tracking-tight">System Dashboard</h1>
+            <h1 className="text-2xl lg:text-3xl font-black text-gray-900 tracking-tight">
+              System Dashboard
+            </h1>
             <p className="text-sm text-gray-500 font-medium">
               Monitor your order to dispatch workflow pipeline.
             </p>
@@ -534,15 +636,20 @@ const Dashboard = () => {
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex flex-col items-end mr-2">
               <span className="text-[10px] font-bold text-gray-400 uppercase">Last Updated</span>
-              <span className="text-xs font-bold text-gray-700">{new Date().toLocaleTimeString()}</span>
+              <span className="text-xs font-bold text-gray-700">
+                {new Date().toLocaleTimeString()}
+              </span>
             </div>
             <button
               onClick={handleRefresh}
               disabled={refreshing}
               className="group flex items-center gap-2 px-5 py-2.5 text-sm font-bold text-white bg-primary rounded hover:bg-primary-hover transition-all shadow-lg shadow-primary/20 active:scale-95"
             >
-              <RefreshCw className={`w-4 h-4 transition-transform duration-500 ${refreshing ? 'animate-spin' : 'group-hover:rotate-180'}`} />
-              {refreshing ? 'Refreshing...' : 'Refresh Analytics'}
+              <RefreshCw
+                className={`w-4 h-4 transition-transform duration-500 ${refreshing ? "animate-spin" : "group-hover:rotate-180"
+                  }`}
+              />
+              {refreshing ? "Refreshing..." : "Refresh Analytics"}
             </button>
           </div>
         </div>
@@ -631,9 +738,9 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Chart Section – Recent Workflow Activity + Godown Load */}
+        {/* Chart Section */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Recent Activity Timeline (from ORDER) */}
+          {/* Monthly Trend Chart */}
           <div className="lg:col-span-2 bg-white rounded border border-white/50 p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <div className="flex justify-between items-center mb-6">
               <h3 className="text-lg font-black text-gray-800 flex items-center gap-2">
@@ -644,19 +751,15 @@ const Dashboard = () => {
                 <div className="relative">
                   <input
                     type="text"
-                    placeholder="Filter date..."
+                    placeholder="Search client..."
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     className="pl-3 pr-8 py-1.5 bg-gray-50 border border-gray-100 rounded-md text-[10px] font-bold outline-none focus:ring-1 focus:ring-primary w-32 sm:w-48 transition-all"
                   />
                 </div>
-                <span className="text-[10px] font-bold text-gray-400 uppercase">
-                  Last 7 days
-                </span>
               </div>
             </div>
 
-            {/* Area Chart for monthly trends */}
             <div className="h-[300px] w-full bg-gray-50/30 rounded p-2 border border-gray-50">
               {monthlyTrendData.labels.length > 0 ? (
                 <Line
@@ -665,23 +768,23 @@ const Dashboard = () => {
                     responsive: true,
                     maintainAspectRatio: false,
                     interaction: {
-                      mode: 'index',
+                      mode: "index",
                       intersect: false,
                     },
                     plugins: {
                       legend: {
-                        position: 'top',
+                        position: "top",
                         labels: {
-                          font: { size: 10, weight: 'bold' },
+                          font: { size: 10, weight: "bold" },
                           usePointStyle: true,
-                          padding: 15
-                        }
+                          padding: 15,
+                        },
                       },
                       tooltip: {
-                        backgroundColor: 'rgba(255, 255, 255, 0.95)',
-                        titleColor: '#1f2937',
-                        bodyColor: '#4b5563',
-                        borderColor: '#e5e7eb',
+                        backgroundColor: "rgba(255, 255, 255, 0.95)",
+                        titleColor: "#1f2937",
+                        bodyColor: "#4b5563",
+                        borderColor: "#e5e7eb",
                         borderWidth: 1,
                         padding: 10,
                         usePointStyle: true,
@@ -690,46 +793,48 @@ const Dashboard = () => {
                             const dataset = context.dataset;
                             const index = context.dataIndex;
                             const extra = dataset.extra ? dataset.extra[index] : null;
-                            const label = dataset.label || '';
+                            const label = dataset.label || "";
 
                             const lines = [`${label}: ${context.parsed.y.toLocaleString()} Planning Qty`];
 
                             if (extra) {
-                              lines.push(`Planning Qty: ${extra.planningQty.toLocaleString()}`);
-                              lines.push(`Remaining Plan Qty: ${extra.remainingQty.toLocaleString()}`);
-                              lines.push(`Delivered Qty: ${extra.deliveredQty.toLocaleString()}`);
-                              lines.push(`Order Cancel: ${extra.cancelQty.toLocaleString()}`);
-                              lines.push(`Completed Dispatches: ${extra.completedCount}`);
+                              lines.push(`Order Qty: ${(extra.qty || 0).toLocaleString()}`);
+                              lines.push(`Remaining Plan Qty: ${(extra.remainingQty || 0).toLocaleString()}`);
+                              lines.push(`Delivered Qty: ${(extra.deliveredQty || 0).toLocaleString()}`);
+                              lines.push(`Cancel Qty: ${(extra.cancelQty || 0).toLocaleString()}`);
+                              lines.push(`Completed Orders: ${(extra.completedCount || 0).toLocaleString()}`);
                             }
 
                             return lines;
-                          }
-                        }
-                      }
+                          },
+                        },
+                      },
                     },
                     scales: {
                       x: {
                         grid: { display: false },
-                        ticks: { font: { size: 10, weight: 'bold' } }
+                        ticks: { font: { size: 10, weight: "bold" } },
                       },
                       y: {
                         beginAtZero: true,
-                        grid: { color: '#f3f4f6' },
-                        ticks: { font: { size: 10, weight: 'bold' } }
-                      }
-                    }
+                        grid: { color: "#f3f4f6" },
+                        ticks: { font: { size: 10, weight: "bold" } },
+                      },
+                    },
                   }}
                 />
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-gray-400">
                   <Activity className="w-12 h-12 mb-2 opacity-20" />
-                  <p className="text-sm font-bold uppercase tracking-widest">No Trend Data Available</p>
+                  <p className="text-sm font-bold uppercase tracking-widest">
+                    No Trend Data Available
+                  </p>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Godown Load (from Planning) – Bar Chart */}
+          {/* Godown Load */}
           <div className="bg-white rounded border border-white/50 p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
             <h3 className="text-lg font-black text-gray-800 mb-6 flex items-center gap-2">
               <Truck className="w-5 h-5 text-primary" />
@@ -738,11 +843,13 @@ const Dashboard = () => {
             <div className="space-y-3 max-h-[300px] overflow-y-auto pr-2">
               {godownLoad.length > 0 ? (
                 godownLoad.map((item) => {
-                  const maxTotal = Math.max(...godownLoad.map(g => g.total), 1);
+                  const maxTotal = Math.max(...godownLoad.map((g) => g.total), 1);
                   const percent = (item.total / maxTotal) * 100;
                   return (
                     <div key={item.godown} className="flex items-center gap-3">
-                      <span className="text-xs font-bold text-gray-600 w-24 truncate">{item.godown}</span>
+                      <span className="text-xs font-bold text-gray-600 w-24 truncate">
+                        {item.godown}
+                      </span>
                       <div className="flex-1 h-8 bg-gray-100 rounded overflow-hidden">
                         <div
                           className="h-full bg-primary rounded flex items-center justify-end pr-2 text-[10px] font-bold text-white"
@@ -757,14 +864,15 @@ const Dashboard = () => {
               ) : (
                 <div className="py-12 text-center">
                   <PackageCheck className="w-12 h-12 text-gray-100 mx-auto mb-2" />
-                  <p className="text-xs text-gray-400 font-bold uppercase tracking-widest">No Active Load</p>
+                  <p className="text-xs text-gray-400 font-bold uppercase tracking-widest">
+                    No Active Load
+                  </p>
                 </div>
               )}
             </div>
           </div>
         </div>
       </div>
-
     </div>
   );
 };
