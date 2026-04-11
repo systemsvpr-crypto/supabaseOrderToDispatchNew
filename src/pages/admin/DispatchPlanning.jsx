@@ -279,6 +279,13 @@ const DispatchPlanning = () => {
     return [...locations].sort();
   }, [orders]);
 
+
+
+
+
+
+
+  
   const requestSort = useCallback((key) => {
     setSortConfig(prev => ({
       key,
@@ -324,7 +331,7 @@ const DispatchPlanning = () => {
 
 
 
-        
+
 
         // 2. Prepare History Record
         currentMaxNo++;
