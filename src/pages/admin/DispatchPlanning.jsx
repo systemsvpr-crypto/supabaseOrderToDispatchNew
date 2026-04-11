@@ -322,7 +322,10 @@ const DispatchPlanning = () => {
         );
 
 
+
+
         
+
         // 2. Prepare History Record
         currentMaxNo++;
         cancelRecords.push({
