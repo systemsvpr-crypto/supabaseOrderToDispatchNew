@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { CheckCircle, History, Save, ChevronDown, ChevronUp, RefreshCw, ClipboardList, X, XCircle } from 'lucide-react';
+import { CheckCircle, History, Save, ChevronDown, ChevronUp, RefreshCw, ClipboardList, X, XCircle, Trash2 } from 'lucide-react';
 import SearchableDropdown from '../../components/SearchableDropdown';
 import { useToast } from '../../contexts/ToastContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../supabaseClient';
 
 // --- Constants ---
@@ -56,6 +57,7 @@ const formatDateToYYYYMMDD = (dateVal) => {
 
 const DispatchComplete = () => {
   const { showToast } = useToast();
+  const { user } = useAuth();
 
   // --- UI state ---
   const [activeTab, setActiveTab] = useState('pending');
@@ -103,7 +105,7 @@ const DispatchComplete = () => {
       if (error) throw error;
 
       const mapped = (data || []).map((item, idx) => ({
-        id: item.id, 
+        id: item.id,
         order_id: item.order_id,
         dispatchNo: item.dispatch_number || '-',
         dispatchDate: item.planned_date || '-',
@@ -113,6 +115,7 @@ const DispatchComplete = () => {
         godownName: item.godown_name || '-',
         qty: item.order?.qty || '0',
         dispatchQty: item.planned_qty || '0',
+        gstIncluded: item.gst_included || 'No',
         crmName: item.order?.submittedby || '-',
         originalIndex: idx
       }));
@@ -155,10 +158,11 @@ const DispatchComplete = () => {
         qty: item.order?.qty || '0',
         dispatchQty: item.planned_qty || '0',
         crmName: item.order?.submittedby || '-',
-        completedAt: item.completed_at
+        completedAt: item.completed_at,
+        status: item.status
       }));
 
-      setHistoryItems(mapped);
+      setHistoryItems(mapped.filter(i => i.status !== 'Canceled'));
     } catch (error) {
       console.error('fetchHistory error:', error);
       showToast('Error', 'Failed to load history: ' + error.message);
@@ -179,41 +183,24 @@ const DispatchComplete = () => {
     };
   }, [fetchPendingOrders, fetchHistory]);
 
-  // --- Fetch master data (item names, godowns) ---
+  // --- Fetch master data from Supabase ---
   const fetchMasterData = useCallback(async () => {
-    if (!MASTER_URL) return;
     try {
       const [productsRes, godownsRes] = await Promise.all([
-        fetch(`${MASTER_URL}?sheet=Products`),
-        fetch(`${MASTER_URL}?sheet=Products&col=4`)
+        supabase.from('master_products').select('product_name').order('product_name'),
+        supabase.from('master_godowns').select('godown_name').order('godown_name')
       ]);
 
-      const productsResult = await productsRes.json();
-      let newItems = [];
-      if (productsResult.success && productsResult.data) {
-        newItems = productsResult.data
-          .slice(1)
-          .map(row => Array.isArray(row) ? row[0] : row)
-          .filter(val => val && String(val).trim() !== "");
-        newItems = [...new Set(newItems)].sort();
-      }
+      if (productsRes.error) throw productsRes.error;
+      if (godownsRes.error) throw godownsRes.error;
 
-      const godownsResult = await godownsRes.json();
-      let newGodowns = [];
-      if (godownsResult.success && godownsResult.data) {
-        newGodowns = godownsResult.data
-          .flat()
-          .map(val => String(val).trim())
-          .filter(val => val && val.toLowerCase() !== "godown");
-        newGodowns = [...new Set(newGodowns)].sort();
-      }
-
-      setItemNames(newItems);
-      setGodowns(newGodowns);
+      setItemNames(productsRes.data.map(p => p.product_name));
+      setGodowns(godownsRes.data.map(g => g.godown_name));
     } catch (error) {
       console.error('Error fetching master data:', error);
+      showToast('Error', 'Failed to load master data: ' + error.message);
     }
-  }, [MASTER_URL]);
+  }, [showToast]);
 
   // Load master data on mount
   useEffect(() => {
@@ -308,66 +295,136 @@ const DispatchComplete = () => {
 
     setIsSaving(true);
     try {
-      // 1. Permanently REDUCE the qty in the app_orders table for EVERY cancellation
-      const targetOrderId = item.order_id;
-      const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', targetOrderId).single();
+      const orderId = item.order_id;
+      const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', orderId).single();
       const newOrderTotal = (parseFloat(currentOrder?.qty) || 0) - qtyToCancel;
-      
-      const { error: ordErr } = await supabase
-        .from('app_orders')
-        .update({ qty: newOrderTotal })
-        .eq('id', targetOrderId);
-      if (ordErr) throw ordErr;
 
+      const { data: allPlans } = await supabase.from('dispatch_plans').select('dispatch_number');
+      const maxNo = (allPlans || []).reduce((max, p) => {
+        const n = parseInt(String(p.dispatch_number).replace('DSP', ''), 10);
+        return isNaN(n) ? max : Math.max(max, n);
+      }, 1000);
 
+      // 1. FIRST: Create History Record / Update Status (Safety Lock)
       if (Math.abs(qtyToCancel - currentQty) < 0.001) {
-        // FULL CANCEL
-        const { error } = await supabase
-          .from('dispatch_plans')
-          .update({
-            status: 'Canceled',
-            dispatch_completed: true,
-            informed_after_dispatch: true
-          })
-          .eq('id', item.id);
-        if (error) throw error;
+        // Full cancel: Update the existing plan status to 'Canceled'
+        const { error } = await supabase.from('dispatch_plans').update({
+          status: 'Canceled',
+          dispatch_completed: true,
+          informed_after_dispatch: true
+        }).eq('id', item.id);
+        if (error) throw new Error(`Audit update failed: ${error.message}`);
       } else {
-        // PARTIAL CANCEL (Split)
-        const newQty = currentQty - qtyToCancel;
-        
-        // 2. Update current plan with reduced quantity
-        const { error: upErr } = await supabase
-          .from('dispatch_plans')
-          .update({ planned_qty: newQty })
-          .eq('id', item.id);
-        if (upErr) throw upErr;
+        // Partial cancel: Reduce existing plan, and create a NEW canceled record for the difference
+        const remainingPlannedQty = currentQty - qtyToCancel;
+        const { error: upErr } = await supabase.from('dispatch_plans').update({
+          planned_qty: remainingPlannedQty
+        }).eq('id', item.id);
+        if (upErr) throw new Error(`Existing plan update failed: ${upErr.message}`);
 
-        // 3. Create new "Canceled" plan for the remainder tracking
-        const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
-        const maxNo = (plans || []).reduce((max, p) => {
-          const n = parseInt(String(p.dispatch_number).replace('DSP', ''), 10);
-          return isNaN(n) ? max : Math.max(max, n);
-        }, 1000);
-        
         const { error: inErr } = await supabase.from('dispatch_plans').insert({
-          order_id: targetOrderId,
+          order_id: orderId,
           dispatch_number: `DSP${maxNo + 1}-CXL`,
           planned_qty: qtyToCancel,
           planned_date: item.dispatchDate,
           godown_name: item.godownName,
           status: 'Canceled',
+          gst_included: item.gstIncluded || 'No',
           dispatch_completed: true,
           informed_before_dispatch: true,
           informed_after_dispatch: true
         });
-        if (inErr) throw inErr;
+        if (inErr) throw new Error(`Audit record creation failed: ${inErr.message}`);
       }
+
+      // 2. SECOND: Permanently REDUCE the qty in the app_orders table
+      const { error: ordErr } = await supabase.from('app_orders').update({ qty: newOrderTotal }).eq('id', orderId);
+      if (ordErr) throw ordErr;
 
       showToast('Order quantity reduced and dispatch cancellation processed', 'success');
       await fetchPendingOrders(true);
     } catch (err) {
       console.error(err);
       showToast('Error', err.message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleBulkCancelDispatch = async () => {
+    const selectedIds = Object.keys(selectedRows).filter(id => selectedRows[id]);
+    if (selectedIds.length === 0) return;
+
+    if (!window.confirm(`Are you sure you want to permanently CANCEL and REDUCE the quantity for these ${selectedIds.length} dispatches?`)) return;
+
+    setIsSaving(true);
+    try {
+      const { data: plansData } = await supabase.from('dispatch_plans').select('dispatch_number');
+      let currentMaxNo = (plansData || []).reduce((max, p) => {
+        const n = parseInt(String(p.dispatch_number).replace(/^(DSP|DN-)/, ''), 10);
+        return isNaN(n) ? max : Math.max(max, n);
+      }, 1000);
+
+      for (const dispatchId of selectedIds) {
+        const rowData = orders.find(o => String(o.id) === String(dispatchId));
+        if (!rowData) continue;
+
+        const loopOrderId = rowData.order_id;
+        const qtyToCancel = editData[dispatchId]?.dispatchQty !== undefined
+          ? parseFloat(editData[dispatchId].dispatchQty)
+          : parseFloat(rowData.dispatchQty);
+
+        const currentQty = parseFloat(rowData.dispatchQty);
+
+        // 1. FIRST: Create History Record / Update Status
+        if (Math.abs(qtyToCancel - currentQty) < 0.001) {
+          // Full cancel: Update the existing plan status to 'Canceled'
+          const { error: updErr } = await supabase.from('dispatch_plans').update({
+            status: 'Canceled',
+            submitted_by: user?.name || 'System',
+            dispatch_completed: true,
+            informed_after_dispatch: true
+          }).eq('id', rowData.id);
+          if (updErr) throw new Error(`Audit update failed: ${updErr.message}`);
+        } else {
+          // Partial cancel: Reduce existing plan, and create a NEW canceled record for the difference
+          const remainingPlannedQty = currentQty - qtyToCancel;
+          const { error: upErr } = await supabase.from('dispatch_plans').update({
+            planned_qty: remainingPlannedQty
+          }).eq('id', rowData.id);
+          if (upErr) throw new Error(`Existing plan update failed: ${upErr.message}`);
+
+          currentMaxNo++;
+          const { error: insErr } = await supabase.from('dispatch_plans').insert({
+            order_id: loopOrderId,
+            dispatch_number: `DN-${currentMaxNo}-CXL`,
+            planned_qty: qtyToCancel,
+            planned_date: rowData.dispatchDate,
+            godown_name: rowData.godownName,
+            status: 'Canceled',
+            gst_included: rowData.gstIncluded || 'No',
+            submitted_by: user?.name || 'System',
+            dispatch_completed: true,
+            informed_before_dispatch: true,
+            informed_after_dispatch: true
+          });
+          if (insErr) throw new Error(`Audit record creation failed: ${insErr.message}`);
+        }
+
+        // 2. SECOND: Permanently REDUCE the qty in the app_orders table
+        const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', loopOrderId).single();
+        const newOrderTotal = (parseFloat(currentOrder?.qty) || 0) - qtyToCancel;
+        const { error: ordErr } = await supabase.from('app_orders').update({ qty: newOrderTotal }).eq('id', loopOrderId);
+        if (ordErr) throw ordErr;
+      }
+
+      showToast('Selected dispatches reduced/canceled successfully', 'success');
+      await fetchPendingOrders(true);
+      setSelectedRows({});
+      setEditData({});
+    } catch (err) {
+      console.error(err);
+      showToast('Error during bulk cancel', err.message);
     } finally {
       setIsSaving(false);
     }
@@ -387,96 +444,12 @@ const DispatchComplete = () => {
     [historyItems, searchTerm, clientFilter, godownFilter, getSortedItems]
   );
 
-  // --- Actions ---
   const handleCheckboxToggle = useCallback((id) => {
     setSelectedRows(prev => ({
       ...prev,
       [id]: !prev[id]
     }));
   }, []);
-
-  const handleBulkCancelDispatch = async () => {
-    const selectedIds = Object.keys(selectedRows).filter(id => selectedRows[id]);
-    if (selectedIds.length === 0) return;
-
-    if (!window.confirm(`Are you sure you want to permanently CANCEL and REDUCE the quantity for these ${selectedIds.length} dispatches?`)) return;
-
-    setIsSaving(true);
-    try {
-      const now = new Date().toISOString();
-      const { data: plansData } = await supabase.from('dispatch_plans').select('dispatch_number');
-      let currentMaxNo = (plansData || []).reduce((max, p) => {
-        const n = parseInt(String(p.dispatch_number).replace('DSP', ''), 10);
-        return isNaN(n) ? max : Math.max(max, n);
-      }, 1000);
-
-      for (const id of selectedIds) {
-        const item = orders.find(o => o.id === id);
-        if (!item) continue;
-
-        const qtyToCancel = editData[id]?.dispatchQty !== undefined 
-          ? parseFloat(editData[id].dispatchQty) 
-          : parseFloat(item.dispatchQty);
-        
-        const currentQty = parseFloat(item.dispatchQty);
-
-        // 1. FIRST: Create History Record / Update Status
-        if (Math.abs(qtyToCancel - currentQty) < 0.001) {
-          // FULL CANCEL
-          const { error: updErr } = await supabase
-            .from('dispatch_plans')
-            .update({
-              status: 'Canceled',
-              dispatch_completed: true,
-              informed_after_dispatch: true
-            })
-            .eq('id', item.id);
-          if (updErr) throw updErr;
-        } else {
-          // PARTIAL CANCEL (Split)
-          const newQty = currentQty - qtyToCancel;
-          const { error: upErr } = await supabase.from('dispatch_plans').update({ planned_qty: newQty }).eq('id', item.id);
-          if (upErr) throw upErr;
-          
-          currentMaxNo++;
-          const { error: insErr } = await supabase.from('dispatch_plans').insert({
-            order_id: targetOrderId,
-            dispatch_number: `DSP${currentMaxNo}-CXL`,
-            planned_qty: qtyToCancel,
-            planned_date: item.dispatchDate,
-            godown_name: item.godownName,
-            status: 'Canceled',
-            gst_included: item.gstIncluded || 'No',
-            dispatch_completed: true,
-            informed_before_dispatch: true,
-            informed_after_dispatch: true
-          });
-          if (insErr) throw insErr;
-        }
-
-        // 2. ONLY IF SUCCESSFUL: Permanently REDUCE the qty in the app_orders table
-        const targetOrderId = item.order_id;
-        const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', targetOrderId).single();
-        const newOrderTotal = (parseFloat(currentOrder?.qty) || 0) - qtyToCancel;
-        
-        const { error: ordErr } = await supabase
-          .from('app_orders')
-          .update({ qty: newOrderTotal })
-          .eq('id', targetOrderId);
-        if (ordErr) throw ordErr;
-      }
-
-      showToast('Selected dispatches reduced/canceled successfully', 'success');
-      await fetchPendingOrders(true);
-      setSelectedRows({});
-      setEditData({});
-    } catch (err) {
-      console.error(err);
-      showToast('Error during bulk cancel', err.message);
-    } finally {
-      setIsSaving(false);
-    }
-  };
 
   const handleEditChange = useCallback((idx, field, value) => {
     setEditData(prev => ({
@@ -495,52 +468,57 @@ const DispatchComplete = () => {
       const rowsToLog = [];
       const updates = [];
 
-      // 1. Prepare updates and log entries for each selected dispatch
-      selectedIds.forEach(id => {
-          const item = orders.find(o => o.id === id);
-          if (item) {
-              // Priority: edited quantity > original planned quantity
-              const finalQty = editData[item.id]?.dispatchQty !== undefined 
-                ? parseInt(editData[item.id].dispatchQty, 10) 
-                : parseInt(item.dispatchQty, 10);
+      for (const id of selectedIds) {
+        const item = orders.find(o => String(o.id) === String(id));
+        if (item) {
+          const finalQty = editData[id]?.dispatchQty !== undefined
+            ? parseInt(editData[id].dispatchQty, 10)
+            : parseInt(item.dispatchQty, 10);
 
-              rowsToLog.push({
-                  dispatch_id: item.id,
-                  dispatch_number: item.dispatchNo,
-                  dispatch_date: item.dispatchDate,
-                  complete_date: now.split('T')[0],
-                  client_name: item.clientName,
-                  product_name: item.itemName,
-                  godown_name: item.godownName,
-                  order_qty: parseInt(item.qty, 10),
-                  dispatch_qty: finalQty,
-                  crm_name: item.crmName,
-                  status: 'Completed'
-              });
+          const finalGodown = editData[id]?.godown || item.godownName;
+          const finalProduct = editData[id]?.product || item.itemName;
 
-              // Add a specific promise to update this individual plan's quantity and status
-              updates.push(
-                supabase
-                  .from('dispatch_plans')
-                  .update({
-                      planned_qty: finalQty, // Update the plan with the FINAL shipped quantity
-                      dispatch_completed: true,
-                      completed_at: now,
-                      status: 'Completed'
-                  })
-                  .eq('id', item.id)
-              );
+          rowsToLog.push({
+            dispatch_id: item.id,
+            dispatch_number: item.dispatchNo,
+            dispatch_date: item.dispatchDate,
+            complete_date: now.split('T')[0],
+            client_name: item.clientName,
+            product_name: finalProduct,
+            godown_name: finalGodown,
+            order_qty: parseInt(item.qty, 10),
+            dispatch_qty: finalQty,
+            crm_name: item.crmName,
+            status: 'Completed'
+          });
+
+          // Dispatch Plan Update
+          updates.push(
+            supabase.from('dispatch_plans').update({
+              planned_qty: finalQty,
+              godown_name: finalGodown,
+              dispatch_completed: true,
+              completed_at: now,
+              status: 'Completed'
+            }).eq('id', item.id)
+          );
+
+          // Order Item Name Update (if changed)
+          if (finalProduct !== item.itemName) {
+            updates.push(
+              supabase.from('app_orders').update({ item_name: finalProduct }).eq('id', item.order_id)
+            );
           }
-      });
+        }
+      }
 
-      // 2. Perform all updates and log entry insertion
-      const [logRes, ...otherRes] = await Promise.all([
+      const results = await Promise.all([
         supabase.from('dispatch_completed_log').insert(rowsToLog),
         ...updates
       ]);
 
-      if (logRes.error) throw logRes.error;
-      otherRes.forEach(res => { if (res.error) throw res.error; });
+      const errorRes = results.find(res => res.error);
+      if (errorRes) throw errorRes.error;
 
       showToast('Dispatch marked as completed and updated!', 'success');
       setSelectedRows({});
@@ -561,7 +539,6 @@ const DispatchComplete = () => {
     fetchMasterData();
   }, [fetchPendingOrders, fetchHistory, fetchMasterData]);
 
-  // ========== Sub-components for Loading ==========
   const TableSkeleton = ({ cols = 10 }) => (
     <>
       {[...Array(6)].map((_, i) => (
@@ -634,7 +611,6 @@ const DispatchComplete = () => {
           </div>
         </div>
 
-        {/* Filters and Actions */}
         <div className="flex flex-col lg:flex-row justify-between gap-4 lg:items-start">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 flex-1 w-full">
             <input
@@ -762,7 +738,7 @@ const DispatchComplete = () => {
                     </div>
                   </th>
                 ))}
-               </tr>
+              </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 text-sm">
               {loadingOrders || loadingHistory ? (
@@ -792,7 +768,7 @@ const DispatchComplete = () => {
                           <input
                             type="checkbox"
                             checked={isSelected}
-                            onChange={() => handleCheckboxToggle(itemId, item)}
+                            onChange={() => handleCheckboxToggle(itemId)}
                             className="rounded text-primary focus:ring-primary w-4 h-4 cursor-pointer"
                           />
                         </td>
@@ -865,11 +841,10 @@ const DispatchComplete = () => {
                                 disabled={!isSelected}
                                 value={editData[itemId]?.status || 'Completed'}
                                 onChange={(e) => handleEditChange(itemId, 'status', e.target.value)}
-                                className={`w-full pl-3 pr-8 py-2 border border-gray-200 rounded text-xs font-semibold appearance-none bg-white transition-all shadow-sm ${
-                                  isSelected
+                                className={`w-full pl-3 pr-8 py-2 border border-gray-200 rounded text-xs font-semibold appearance-none bg-white transition-all shadow-sm ${isSelected
                                     ? 'cursor-pointer hover:border-primary focus:ring-primary focus:border-transparent outline-none'
                                     : 'bg-gray-50 opacity-70 cursor-not-allowed'
-                                }`}
+                                  }`}
                               >
                                 <option value="Completed">Completed</option>
                                 <option value="Pending">Pending</option>
@@ -899,7 +874,20 @@ const DispatchComplete = () => {
                           </td>
                         </>
                       )}
-                      {activeTab === 'pending' && <td className="px-6 py-4 border-l border-gray-50 text-xs font-medium text-gray-500">{item.crmName}</td>}
+                      {activeTab === 'pending' && (
+                        <td className="px-6 py-4 border-l border-gray-50 text-xs font-medium text-gray-500">
+                          <div className="flex items-center justify-between gap-2">
+                            <span>{item.crmName}</span>
+                            <button
+                              onClick={() => handleCancelDispatch(item)}
+                              className="p-1 text-gray-400 hover:text-red-600 transition-colors"
+                              title="Cancel Dispatch"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   );
                 })
@@ -924,11 +912,11 @@ const DispatchComplete = () => {
           ) : (
             <div className="divide-y divide-gray-200">
               {(activeTab === 'pending' ? filteredAndSortedPending : filteredAndSortedHistory).map((item) => {
-                const realIdx = item.originalIndex;
-                const isSelected = activeTab === 'pending' && !!selectedRows[realIdx];
+                const itemId = item.id;
+                const isSelected = activeTab === 'pending' && !!selectedRows[itemId];
                 return (
                   <div
-                    key={activeTab === 'pending' ? `mp-${item.dispatchNo}-${realIdx}` : `mh-${item.dispatchNo}-${realIdx}`}
+                    key={activeTab === 'pending' ? `mp-${item.id}` : `mh-${item.id}`}
                     className={`p-4 space-y-4 transition-colors ${isSelected ? 'bg-green-50/50' : 'bg-white'}`}
                   >
                     <div className="flex justify-between items-start">
@@ -937,12 +925,20 @@ const DispatchComplete = () => {
                         <p className="font-bold text-gray-900 text-sm">{item.dispatchNo}</p>
                       </div>
                       {activeTab === 'pending' && (
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => handleCheckboxToggle(realIdx, item)}
-                          className="rounded text-primary focus:ring-primary w-4 h-4 cursor-pointer mt-1"
-                        />
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={() => handleCancelDispatch(item)}
+                            className="p-1 text-gray-400 hover:text-red-600 transition-colors"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleCheckboxToggle(itemId)}
+                            className="rounded text-primary focus:ring-primary w-4 h-4 cursor-pointer mt-1"
+                          />
+                        </div>
                       )}
                     </div>
                     <div className="grid grid-cols-2 gap-3 text-sm">
@@ -954,12 +950,12 @@ const DispatchComplete = () => {
                         <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Dispatch Date</p>
                         <p className="text-gray-600">{formatDisplayDate(item.dispatchDate)}</p>
                       </div>
-                      <div>
+                      <div className="col-span-2">
                         <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Product</p>
                         {activeTab === 'pending' && isSelected ? (
                           <SearchableDropdown
-                            value={editData[realIdx]?.product || item.itemName}
-                            onChange={(val) => handleEditChange(realIdx, 'product', val)}
+                            value={editData[itemId]?.product || item.itemName}
+                            onChange={(val) => handleEditChange(itemId, 'product', val)}
                             options={itemNames}
                             placeholder="Select Product"
                             showAll={false}
@@ -974,8 +970,8 @@ const DispatchComplete = () => {
                         <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Godown</p>
                         {activeTab === 'pending' && isSelected ? (
                           <SearchableDropdown
-                            value={editData[realIdx]?.godown || item.godownName}
-                            onChange={(val) => handleEditChange(realIdx, 'godown', val)}
+                            value={editData[itemId]?.godown || item.godownName}
+                            onChange={(val) => handleEditChange(itemId, 'godown', val)}
                             options={godowns}
                             placeholder="Select Godown"
                             showAll={false}
@@ -987,16 +983,12 @@ const DispatchComplete = () => {
                         )}
                       </div>
                       <div>
-                        <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Order Qty</p>
-                        <p className="text-gray-700">{item.qty || item.orderQty}</p>
-                      </div>
-                      <div>
                         <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Dispatch Qty</p>
                         {activeTab === 'pending' && isSelected ? (
                           <input
                             type="text"
-                            value={editData[realIdx]?.dispatchQty || item.dispatchQty}
-                            onChange={(e) => handleEditChange(realIdx, 'dispatchQty', e.target.value)}
+                            value={editData[itemId]?.dispatchQty || item.dispatchQty}
+                            onChange={(e) => handleEditChange(itemId, 'dispatchQty', e.target.value)}
                             className="w-full px-2 py-1 border rounded text-xs outline-none focus:border-primary"
                           />
                         ) : (
@@ -1010,51 +1002,12 @@ const DispatchComplete = () => {
                             <input
                               type="date"
                               disabled={!isSelected}
-                              value={editData[realIdx]?.completeDate || ''}
-                              onChange={(e) => handleEditChange(realIdx, 'completeDate', e.target.value)}
+                              value={editData[itemId]?.completeDate || ''}
+                              onChange={(e) => handleEditChange(itemId, 'completeDate', e.target.value)}
                               className="w-full px-2 py-1 border rounded text-xs outline-none focus:border-primary disabled:opacity-50"
                             />
                           </div>
-                          <div>
-                            <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Status</p>
-                            <div className="relative">
-                              <select
-                                disabled={!isSelected}
-                                value={editData[realIdx]?.status || 'Completed'}
-                                onChange={(e) => handleEditChange(realIdx, 'status', e.target.value)}
-                                className={`w-full pl-3 pr-8 py-1.5 border border-gray-200 rounded text-xs font-semibold appearance-none bg-white ${
-                                  isSelected ? 'cursor-pointer' : 'opacity-60 cursor-not-allowed'
-                                }`}
-                              >
-                                <option value="Completed">Completed</option>
-                                <option value="Pending">Pending</option>
-                              </select>
-                              <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-gray-400">
-                                <ChevronDown size={12} />
-                              </div>
-                            </div>
-                          </div>
                         </>
-                      )}
-                      {activeTab === 'history' && (
-                        <>
-                          <div>
-                            <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Complete Date</p>
-                            <p className="text-gray-600">{formatDisplayDate(item.completeDate)}</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] font-bold text-primary uppercase mb-0.5">Status</p>
-                            <span className="bg-green-100 text-green-700 px-2 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider border border-green-200">
-                              {item.status}
-                            </span>
-                          </div>
-                        </>
-                      )}
-                      {activeTab === 'pending' && (
-                        <div className="col-span-2">
-                          <p className="text-[10px] font-bold text-primary uppercase mb-0.5">CRM Name</p>
-                          <p className="text-gray-500">{item.crmName}</p>
-                        </div>
                       )}
                     </div>
                   </div>

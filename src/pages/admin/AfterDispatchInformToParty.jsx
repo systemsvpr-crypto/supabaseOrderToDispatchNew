@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { Mail, History, Save, ChevronUp, ChevronDown, RefreshCw, ClipboardList, CheckCircle } from 'lucide-react';
 import SearchableDropdown from '../../components/SearchableDropdown';
 import { useToast } from '../../contexts/ToastContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../supabaseClient';
 
 // --- Format date for display ---
@@ -37,6 +38,7 @@ const TableSkeleton = () => (
 );
 
 const AfterDispatchInformToParty = () => {
+  const { user } = useAuth();
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState('pending');
   const [selectedRows, setSelectedRows] = useState({});
@@ -57,42 +59,43 @@ const AfterDispatchInformToParty = () => {
     else setIsLoading(true);
 
     try {
-        const { data, error } = await supabase
-            .from('dispatch_plans')
-            .select(`
+      const { data, error } = await supabase
+        .from('dispatch_plans')
+        .select(`
                 *,
                 order:app_orders(*)
             `)
-            .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false });
 
-        if (error) throw error;
+      if (error) throw error;
 
-        const allMapped = (data || []).map(item => ({
-            id: item.id,
-            dispatchNo: item.dispatch_number || '-',
-            dispatchDate: item.planned_date || '-',
-            orderNo: item.order?.order_number || '-',
-            customerName: item.order?.client_name || '-',
-            productName: item.order?.item_name || '-',
-            godown: item.godown_name || '-',
-            crmName: item.order?.submittedby || '-',
-            orderQty: item.order?.qty || '0',
-            dispatchQty: item.planned_qty || '0',
-            completed: item.dispatch_completed,
-            informedAfter: item.informed_after_dispatch,
-            informedAt: item.informed_at,
-            status: item.informed_after_dispatch ? 'Informed' : 'Pending'
-        }));
+      const allMapped = (data || []).map(item => ({
+        id: item.id,
+        dispatchNo: item.dispatch_number || '-',
+        dispatchDate: item.planned_date || '-',
+        orderNo: item.order?.order_number || '-',
+        customerName: item.order?.client_name || '-',
+        productName: item.order?.item_name || '-',
+        godown: item.godown_name || '-',
+        crmName: item.order?.submittedby || '-',
+        orderQty: item.order?.qty || '0',
+        dispatchQty: item.planned_qty || '0',
+        completed: item.dispatch_completed,
+        informedAfter: item.informed_after_dispatch,
+        informedAt: item.informed_at,
+        db_status: item.status,
+        status: item.informed_after_dispatch ? 'Informed' : 'Pending'
+      }));
 
-        setPendingItems(allMapped.filter(i => i.completed && !i.informedAfter));
-        setHistoryItems(allMapped.filter(i => i.informedAfter));
+      setPendingItems(allMapped.filter(i => i.completed && !i.informedAfter && i.db_status !== 'Canceled'));
+      setHistoryItems(allMapped.filter(i => i.informedAfter && i.db_status !== 'Canceled'));
 
     } catch (error) {
-        console.error('fetchData error:', error);
-        showToast('Error', 'Failed to load items: ' + error.message);
+      console.error('fetchData error:', error);
+      showToast('Error', 'Failed to load items: ' + error.message);
     } finally {
-        setIsRefreshing(false);
-        setIsLoading(false);
+      setIsRefreshing(false);
+      setIsLoading(false);
     }
   }, [showToast]);
 
@@ -145,10 +148,10 @@ const AfterDispatchInformToParty = () => {
   // --- Actions ---
   const handleCheckboxToggle = (id) => {
     setSelectedRows(prev => {
-        const next = { ...prev };
-        if (next[id]) delete next[id];
-        else next[id] = true;
-        return next;
+      const next = { ...prev };
+      if (next[id]) delete next[id];
+      else next[id] = true;
+      return next;
     });
   };
 
@@ -158,13 +161,14 @@ const AfterDispatchInformToParty = () => {
 
     setIsSaving(true);
     try {
-        const { error } = await supabase
-            .from('dispatch_plans')
-            .update({
-                informed_after_dispatch: true,
-                informed_at: new Date().toISOString()
-            })
-            .in('id', selectedIds);
+      const { error } = await supabase
+        .from('dispatch_plans')
+        .update({
+          informed_after_dispatch: true,
+          informed_after: new Date().toISOString(),
+          submitted_by: user?.name || 'System'
+        })
+        .in('id', selectedIds);
 
       if (error) throw error;
 
@@ -258,41 +262,41 @@ const AfterDispatchInformToParty = () => {
             <thead>
               <tr className="bg-gray-50 sticky top-0 z-10 border-b border-gray-200">
                 {activeTab === 'pending' && (
-                    <th className="px-6 py-4 text-center w-16">
-                      <input
-                        type="checkbox"
-                        checked={pendingItems.length > 0 && filteredItems.every(it => selectedRows[it.id])}
-                        onChange={() => {
-                          const allCurrent = filteredItems.map(it => it.id);
-                          const allSelected = allCurrent.every(id => selectedRows[id]);
-                          setSelectedRows(prev => {
-                            const next = { ...prev };
-                            allCurrent.forEach(id => { if (allSelected) delete next[id]; else next[id] = true; });
-                            return next;
-                          });
-                        }}
-                        className="rounded-md w-5 h-5 cursor-pointer"
-                      />
-                    </th>
+                  <th className="px-6 py-4 text-center w-16">
+                    <input
+                      type="checkbox"
+                      checked={pendingItems.length > 0 && filteredItems.every(it => selectedRows[it.id])}
+                      onChange={() => {
+                        const allCurrent = filteredItems.map(it => it.id);
+                        const allSelected = allCurrent.every(id => selectedRows[id]);
+                        setSelectedRows(prev => {
+                          const next = { ...prev };
+                          allCurrent.forEach(id => { if (allSelected) delete next[id]; else next[id] = true; });
+                          return next;
+                        });
+                      }}
+                      className="rounded-md w-5 h-5 cursor-pointer"
+                    />
+                  </th>
                 )}
                 {[
-                    { label: 'Dispatch No', key: 'dispatchNo' },
-                    { label: 'Dispatch Date', key: 'dispatchDate', align: 'center' },
-                    { label: 'Order No', key: 'orderNo' },
-                    { label: 'Customer', key: 'customerName' },
-                    { label: 'Product Name', key: 'productName' },
-                    { label: 'Godown', key: 'godown', align: 'center' },
-                    { label: 'CRM Name', key: 'crmName' },
-                    { label: 'Order Qty', key: 'orderQty', align: 'right' },
-                    { label: 'Status', key: 'status', align: 'center' },
-                    { label: 'Dispatch Qty', key: 'dispatchQty', align: 'right' },
+                  { label: 'Dispatch No', key: 'dispatchNo' },
+                  { label: 'Dispatch Date', key: 'dispatchDate', align: 'center' },
+                  { label: 'Order No', key: 'orderNo' },
+                  { label: 'Customer', key: 'customerName' },
+                  { label: 'Product Name', key: 'productName' },
+                  { label: 'Godown', key: 'godown', align: 'center' },
+                  { label: 'CRM Name', key: 'crmName' },
+                  { label: 'Order Qty', key: 'orderQty', align: 'right' },
+                  { label: 'Status', key: 'status', align: 'center' },
+                  { label: 'Dispatch Qty', key: 'dispatchQty', align: 'right' },
                 ].map(col => (
-                    <th key={col.key} className={`px-6 py-4 cursor-pointer hover:bg-gray-100 transition-colors ${col.align === 'center' ? 'text-center' : col.align === 'right' ? 'text-right' : 'text-left'}`} onClick={() => requestSort(col.key)}>
+                  <th key={col.key} className={`px-6 py-4 cursor-pointer hover:bg-gray-100 transition-colors ${col.align === 'center' ? 'text-center' : col.align === 'right' ? 'text-right' : 'text-left'}`} onClick={() => requestSort(col.key)}>
                     <div className={`flex items-center gap-1.5 ${col.align === 'center' ? 'justify-center' : col.align === 'right' ? 'justify-end' : ''}`}>
-                        <span className="text-[11px] font-black uppercase tracking-widest text-gray-500">{col.label}</span>
-                        <ChevronDown size={10} className={sortConfig.key === col.key ? 'text-primary' : 'text-gray-300'} />
+                      <span className="text-[11px] font-black uppercase tracking-widest text-gray-500">{col.label}</span>
+                      <ChevronDown size={10} className={sortConfig.key === col.key ? 'text-primary' : 'text-gray-300'} />
                     </div>
-                    </th>
+                  </th>
                 ))}
               </tr>
             </thead>
@@ -306,9 +310,9 @@ const AfterDispatchInformToParty = () => {
                 return (
                   <tr key={item.id} className={`group ${isSelected ? 'bg-primary/5' : 'hover:bg-gray-50/50'} transition-all`}>
                     {activeTab === 'pending' && (
-                        <td className="px-6 py-4 text-center">
-                          <input type="checkbox" checked={isSelected} onChange={() => handleCheckboxToggle(item.id)} className="rounded-md w-5 h-5 cursor-pointer" />
-                        </td>
+                      <td className="px-6 py-4 text-center">
+                        <input type="checkbox" checked={isSelected} onChange={() => handleCheckboxToggle(item.id)} className="rounded-md w-5 h-5 cursor-pointer" />
+                      </td>
                     )}
                     <td className="px-6 py-4"><span className="px-2 py-1 rounded bg-indigo-50 text-indigo-700 font-black text-[10px] tracking-wider uppercase">{item.dispatchNo}</span></td>
                     <td className="px-6 py-4 text-center font-bold text-[11px] text-gray-500">{formatDisplayDate(item.dispatchDate)}</td>
@@ -319,9 +323,9 @@ const AfterDispatchInformToParty = () => {
                     <td className="px-6 py-4 text-gray-400 text-[11px] italic font-bold">{item.crmName}</td>
                     <td className="px-6 py-4 text-right text-gray-700 font-black text-[13px]">{item.orderQty}</td>
                     <td className="px-6 py-4 text-center">
-                        <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest ${activeTab === 'pending' ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'}`}>
+                      <span className={`px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest ${activeTab === 'pending' ? 'bg-amber-50 text-amber-600' : 'bg-emerald-50 text-emerald-600'}`}>
                         {item.status}
-                        </span>
+                      </span>
                     </td>
                     <td className="px-6 py-4 text-right font-black text-primary text-[14px]">{item.dispatchQty}</td>
                   </tr>

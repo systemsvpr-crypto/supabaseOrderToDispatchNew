@@ -73,7 +73,7 @@ const PcReport = () => {
                 if (remaining > 0.001) {
                     report.push({
                         id: `ORDER-${order.id}`,
-                        orderNumber: order.order_number || '-',
+                        uniqueNumber: order.order_number || '-',
                         plannedDate: formatDisplayDate(order.order_date),
                         stepName: 'Dispatch Planning',
                         who: order.created_by || 'Ravi',
@@ -81,14 +81,15 @@ const PcReport = () => {
                         godown: order.godown_name || '-',
                         itemName: order.item_name || '-',
                         orderQty: order.qty || '0',
-                        canceledQty: canceledSum || '0'
+                        canceledQty: canceledSum || '0',
+                        isDispatch: false
                     });
                 }
             });
 
             // 2. Active Plans logic (Notification and Shipping Stages)
             allPlans.forEach(plan => {
-                if (plan.status === 'Canceled') return; // Do not show canceled plans in the active tracking stages
+                if (plan.status === 'Canceled') return; // Do not show canceled plans
                 
                 const order = allOrders.find(o => o.id === plan.order_id);
                 
@@ -105,12 +106,12 @@ const PcReport = () => {
                     step = 'After Dispatch Inform';
                     who = 'CRM';
                 } else {
-                    return; // Skip completed items as requested
+                    return; // Skip completed items
                 }
 
                 report.push({
                     id: `PLAN-${plan.id}`,
-                    orderNumber: order?.order_number || plan.dispatch_number,
+                    uniqueNumber: plan.dispatch_number || order?.order_number || '-',
                     plannedDate: formatDisplayDate(plan.planned_date),
                     stepName: step,
                     who: who,
@@ -118,7 +119,8 @@ const PcReport = () => {
                     godown: plan.godown_name || order?.godown_name || '-',
                     itemName: order?.item_name || '-',
                     orderQty: plan.planned_qty || '0',
-                    canceledQty: '0' // Plans that are in-progress don't show individual cancels here
+                    canceledQty: '0',
+                    isDispatch: true
                 });
             });
 
@@ -194,7 +196,7 @@ const PcReport = () => {
                             <tr className="bg-gray-50/80 border-b border-gray-200 text-[11px] uppercase text-gray-500 font-black tracking-widest">
                                 <th className="px-6 py-4 text-center">Action</th>
                                 {[
-                                    { label: 'Unique Number', key: 'orderNumber' },
+                                    { label: 'Unique Number', key: 'uniqueNumber' },
                                     { label: 'Planned Date', key: 'plannedDate', align: 'center' },
                                     { label: 'Step Name', key: 'stepName' },
                                     { label: 'Client Name', key: 'clientName' },
@@ -219,7 +221,7 @@ const PcReport = () => {
                                         <td className="px-6 py-3 text-center">
                                             <button onClick={() => openReportModal(item)} className="px-3 py-1 bg-[#68d306] text-white rounded text-xs font-bold hover:bg-[#5bb805] shadow-sm transform active:scale-95 transition-all">Update</button>
                                         </td>
-                                        <td className="px-6 py-3 font-bold text-gray-800">{item.orderNumber}</td>
+                                        <td className="px-6 py-3 font-bold text-gray-800">{item.uniqueNumber}</td>
                                         <td className="px-6 py-3 text-gray-500 text-center">{item.plannedDate}</td>
                                         <td className="px-6 py-3 text-gray-500">{item.stepName}</td>
                                         <td className="px-6 py-3 text-gray-500 font-medium">{item.clientName}</td>
@@ -246,7 +248,7 @@ const PcReport = () => {
                         <form onSubmit={handleFormSubmit} className="p-8 space-y-6">
                             <div>
                                 <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">Unique Number</label>
-                                <div className="px-4 py-3 bg-gray-50 border border-gray-100 rounded text-sm text-gray-800 font-bold">{currentItem?.orderNumber}</div>
+                                <div className="px-4 py-3 bg-gray-50 border border-gray-100 rounded text-sm text-gray-800 font-bold">{currentItem?.uniqueNumber}</div>
                             </div>
                             <div>
                                 <label className="block text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2">Stage / Step Name</label>

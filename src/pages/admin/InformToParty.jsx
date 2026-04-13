@@ -2,9 +2,11 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { BellRing, History, Save, X, ChevronUp, ChevronDown, RefreshCw } from 'lucide-react';
 import SearchableDropdown from '../../components/SearchableDropdown';
 import { useToast } from '../../contexts/ToastContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../supabaseClient';
 
 const InformToParty = () => {
+    const { user } = useAuth();
     const [pendingItems, setPendingItems] = useState([]);
     const [historyItems, setHistoryItems] = useState([]);
     const [activeTab, setActiveTab] = useState('pending');
@@ -95,7 +97,6 @@ const InformToParty = () => {
                     *,
                     order:app_orders(*)
                 `)
-                .eq('dispatch_completed', false)
                 .order('created_at', { ascending: false });
 
             if (error) throw error;
@@ -111,11 +112,15 @@ const InformToParty = () => {
                 dispatchQty: item.planned_qty || '-',
                 dispatchDate: item.planned_date || '-',
                 informed: item.informed_before_dispatch,
-                informedAt: item.informed_at
+                informedAt: item.informed_at,
+                dispatchCompleted: item.dispatch_completed,
+                status: item.status
             }));
 
-            setPendingItems(allItems.filter(item => !item.informed));
-            setHistoryItems(allItems.filter(item => item.informed));
+            // Pending: Not informed, not completed, and not canceled
+            setPendingItems(allItems.filter(item => !item.informed && !item.dispatchCompleted && item.status !== 'Canceled'));
+            // History: Everything that has been informed, excluding Canceled
+            setHistoryItems(allItems.filter(item => item.informed && item.status !== 'Canceled'));
 
         } catch (error) {
             console.error('fetchInformData error:', error);
@@ -210,7 +215,8 @@ const InformToParty = () => {
                 .from('dispatch_plans')
                 .update({
                     informed_before_dispatch: true,
-                    informed_at: new Date().toISOString()
+                    informed_at: new Date().toISOString(),
+                    submitted_by: user?.name || 'System'
                 })
                 .in('id', selectedIds);
 

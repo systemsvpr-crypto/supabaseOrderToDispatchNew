@@ -5,7 +5,7 @@ import { useToast } from '../../contexts/ToastContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../supabaseClient';
 
-const GODOWNS = ['Godown 1', 'Godown 2', 'Main Store', 'North Warehouse'];
+
 
 const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
 const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
@@ -130,8 +130,34 @@ const DispatchPlanning = () => {
   const [refreshingOrders, setRefreshingOrders] = useState(false);
   const [refreshingHistory, setRefreshingHistory] = useState(false);
 
+  const [godowns, setGodowns] = useState([]);
+  const [itemNames, setItemNames] = useState([]);
+
   const pendingAbortRef = useRef(null);
   const historyAbortRef = useRef(null);
+
+  // --- Fetch master data from Supabase ---
+  const fetchMasterData = useCallback(async () => {
+    try {
+      const [productsRes, godownsRes] = await Promise.all([
+        supabase.from('master_products').select('product_name').order('product_name'),
+        supabase.from('master_godowns').select('godown_name').order('godown_name')
+      ]);
+
+      if (productsRes.error) throw productsRes.error;
+      if (godownsRes.error) throw godownsRes.error;
+
+      setItemNames((productsRes.data || []).map(p => p.product_name));
+      setGodowns((godownsRes.data || []).map(g => g.godown_name));
+    } catch (error) {
+      console.error('Error fetching master data:', error);
+      showToast('Error', 'Failed to load master data: ' + error.message);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    fetchMasterData();
+  }, [fetchMasterData]);
 
   const fetchPendingOrders = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshingOrders(true);
@@ -173,6 +199,7 @@ const DispatchPlanning = () => {
           planningQty: 0,
           planningPendingQty: item.qty || 0,
           qtyDelivered: 0,
+          gstIncluded: item.gst_included || 'No',
           originalIndex: index
         };
       });
@@ -285,7 +312,7 @@ const DispatchPlanning = () => {
 
 
 
-  
+
   const requestSort = useCallback((key) => {
     setSortConfig(prev => ({
       key,
@@ -323,7 +350,7 @@ const DispatchPlanning = () => {
         const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', order.id).single();
         const currentTotalRecordQty = (parseFloat(currentOrder?.qty) || 0);
         const newOrderTotal = currentTotalRecordQty - qtyToCancel;
-        
+
         orderUpdates.push(
           supabase.from('app_orders').update({ qty: newOrderTotal }).eq('id', order.id)
         );
@@ -343,6 +370,7 @@ const DispatchPlanning = () => {
           godown_name: String(planningData.godownName || order.godownName || '-'),
           status: 'Canceled',
           gst_included: planningData.gstIncluded || 'No',
+          submitted_by: user?.name || 'System',
           dispatch_completed: true,
           informed_before_dispatch: true,
           informed_after_dispatch: true
@@ -377,7 +405,7 @@ const DispatchPlanning = () => {
   const handleCancelOrder = async (order) => {
     const cancelQtyStr = window.prompt(`Enter quantity to CANCEL for ${order.orderNo} (Max: ${order.planningPendingQty}):`, order.planningPendingQty);
     if (cancelQtyStr === null) return;
-    
+
     const qtyToCancel = parseFloat(cancelQtyStr);
     if (isNaN(qtyToCancel) || qtyToCancel <= 0) {
       showToast('Error', 'Please enter a valid quantity');
@@ -393,24 +421,11 @@ const DispatchPlanning = () => {
     try {
       const now = new Date().toISOString();
       const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
-      const maxNo = (plans || []).reduce((max, p) => {
-        const n = parseInt(String(p.dispatch_number).replace('DSP', ''), 10);
-        return isNaN(n) ? max : Math.max(max, n);
-      }, 1000);
-      
       const newDNo = `DSP${maxNo + 1}-CXL`;
+      const { data: currentOrderData } = await supabase.from('app_orders').select('qty').eq('id', order.id).single();
+      const newOrderTotal = (parseFloat(currentOrderData?.qty) || 0) - qtyToCancel;
 
-      // 1. Permanently REDUCE the qty in the app_orders table
-      const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', order.id).single();
-      const newOrderTotal = (parseFloat(currentOrder?.qty) || 0) - qtyToCancel;
-      
-      const { error: ordErr } = await supabase
-        .from('app_orders')
-        .update({ qty: newOrderTotal })
-        .eq('id', order.id);
-      if (ordErr) throw ordErr;
-
-      // 2. Track in dispatch_plans for history
+      // 1. FIRST: Track in dispatch_plans for history (Safety Lock)
       const { error } = await supabase.from('dispatch_plans').insert({
         order_id: order.id,
         dispatch_number: newDNo,
@@ -418,13 +433,21 @@ const DispatchPlanning = () => {
         planned_date: now.split('T')[0],
         godown_name: order.godownName || '-',
         status: 'Canceled',
+        gst_included: order.gstIncluded || 'No',
+        submitted_by: user?.name || 'System',
         dispatch_completed: true,
         informed_before_dispatch: true,
-        informed_after_dispatch: true,
-        remarks: 'Order quantity permanently reduced/canceled from Planning'
+        informed_after_dispatch: true
       });
-
       if (error) throw error;
+
+      // 2. SECOND: Permanently REDUCE the qty in the app_orders table
+      const { error: ordErr } = await supabase
+        .from('app_orders')
+        .update({ qty: newOrderTotal })
+        .eq('id', order.id);
+      if (ordErr) throw ordErr;
+
       showToast('Order quantity permanently reduced successfully', 'success');
       await fetchPendingOrders(true);
     } catch (err) {
@@ -462,7 +485,7 @@ const DispatchPlanning = () => {
 
   const filteredAndSortedOrders = useMemo(() => {
     if (!orders) return [];
-    
+
     // Group all plans by order_id and sum their quantities
     const plannedQtyMap = {};
     const deliveredQtyMap = {};
@@ -470,30 +493,34 @@ const DispatchPlanning = () => {
     (dispatchHistory || []).forEach(plan => {
       if (plan.order_id) {
         const qtyValue = parseFloat(plan.dispatchQty) || 0;
-        // Total Planned (everything in dispatch_plans)
-        plannedQtyMap[plan.order_id] = (plannedQtyMap[plan.order_id] || 0) + qtyValue;
-        
-        // Total Delivered (only if marked completed in database)
-        if (plan.dispatch_completed) {
-          deliveredQtyMap[plan.order_id] = (deliveredQtyMap[plan.order_id] || 0) + qtyValue;
+
+        // Exclude cancelled items from calculations as they are already removed from order qty in app_orders
+        if (plan.status !== 'Canceled') {
+          // Total Planned (everything except Canceled)
+          plannedQtyMap[plan.order_id] = (plannedQtyMap[plan.order_id] || 0) + qtyValue;
+
+          // Total Delivered (only if marked completed and NOT Canceled)
+          if (plan.dispatch_completed) {
+            deliveredQtyMap[plan.order_id] = (deliveredQtyMap[plan.order_id] || 0) + qtyValue;
+          }
         }
       }
     });
 
     const filtered = orders.map(order => {
-        const totalOrderQty = parseFloat(order.qty) || 0;
-        const totalAlreadyPlanned = plannedQtyMap[order.id] || 0;
-        const totalAlreadyDelivered = deliveredQtyMap[order.id] || 0;
-        
-        // The balance available to plan is what hasn't been put into a dispatch plan yet
-        const remainingToPlan = totalOrderQty - totalAlreadyPlanned;
-        
-        return {
-            ...order,
-            qtyDelivered: totalAlreadyDelivered,
-            planningPendingQty: remainingToPlan > 0 ? remainingToPlan : 0,
-            alreadyPlannedSum: totalAlreadyPlanned
-        };
+      const totalOrderQty = parseFloat(order.qty) || 0;
+      const totalAlreadyPlanned = plannedQtyMap[order.id] || 0;
+      const totalAlreadyDelivered = deliveredQtyMap[order.id] || 0;
+
+      // The balance available to plan is what hasn't been put into a dispatch plan yet
+      const remainingToPlan = totalOrderQty - totalAlreadyPlanned;
+
+      return {
+        ...order,
+        qtyDelivered: totalAlreadyDelivered,
+        planningPendingQty: remainingToPlan > 0 ? remainingToPlan : 0,
+        alreadyPlannedSum: totalAlreadyPlanned
+      };
     }).filter(order => {
       // CRITICAL: Show the order if there is still quantity left to plan (remaining > 0)
       const hasBalance = order.planningPendingQty > 0.001; // use small epsilon for float safety
@@ -517,6 +544,7 @@ const DispatchPlanning = () => {
   const filteredAndSortedHistory = useMemo(() => {
     if (!dispatchHistory) return [];
     const filtered = dispatchHistory.filter(item => {
+      if (item.status === 'Canceled') return false;
       const matchesSearch = Object.values(item).some(val =>
         String(val).toLowerCase().includes(searchTerm.toLowerCase())
       );
@@ -567,23 +595,23 @@ const DispatchPlanning = () => {
 
   const handleSave = useCallback(async () => {
     let currentMaxNo = (() => {
-        const allNos = (dispatchHistory || [])
-            .map(h => h.dispatchNo || h.dispatch_number)
-            .filter(no => no && no.startsWith('DSP'))
-            .map(no => parseInt(no.replace('DSP', ''), 10))
-            .filter(n => !isNaN(n));
-        return allNos.length > 0 ? Math.max(...allNos) : 1000;
+      const allNos = (dispatchHistory || [])
+        .map(h => h.dispatchNo || h.dispatch_number)
+        .filter(no => no && (no.startsWith('DSP') || no.startsWith('DN-')))
+        .map(no => parseInt(no.replace(/^(DSP|DN-)/, ''), 10))
+        .filter(n => !isNaN(n));
+      return allNos.length > 0 ? Math.max(...allNos) : 1000;
     })();
 
     const plansToSubmit = [];
-    
+
     Object.keys(selectedRows).forEach((key) => {
       if (selectedRows[key]) {
         const order = orders?.find(o => getRowKey(o) === key);
         const planningData = editData[key];
         if (order && planningData) {
           currentMaxNo++; // Increment for every single item to ensure uniqueness
-          const individualDispatchNo = `DSP${currentMaxNo}`;
+          const individualDispatchNo = `DN-${currentMaxNo}`;
 
           plansToSubmit.push({
             order_id: order.id,
@@ -592,7 +620,8 @@ const DispatchPlanning = () => {
             planned_date: planningData.dispatchDate,
             gst_included: planningData.gstIncluded,
             godown_name: planningData.godownName || order.godownName,
-            status: 'Planned'
+            status: 'Planned',
+            submitted_by: user?.name || 'System'
           });
         }
       }
@@ -889,15 +918,17 @@ const DispatchPlanning = () => {
                               </td>
                               <td className="px-6 py-4 animate-column text-center">
                                 {selectedRows[key] ? (
-                                  <select
-                                    value={editData[key]?.godownName || order.godownName}
-                                    onChange={(e) => handleEditChange(key, 'godownName', e.target.value)}
-                                    className="px-2 py-1 border rounded text-xs outline-none focus:border-primary w-full"
-                                  >
-                                    {[...new Set([...GODOWNS, order.godownName])].map(g => (
-                                      <option key={g} value={g}>{g}</option>
-                                    ))}
-                                  </select>
+                                  <div className="w-full min-w-[150px]">
+                                    <SearchableDropdown
+                                      value={editData[key]?.godownName || order.godownName}
+                                      onChange={(val) => handleEditChange(key, 'godownName', val)}
+                                      options={godowns}
+                                      placeholder="Select Godown"
+                                      showAll={false}
+                                      focusColor="primary"
+                                      className="w-full h-8"
+                                    />
+                                  </div>
                                 ) : (
                                   <span className="text-gray-400">-</span>
                                 )}
@@ -990,15 +1021,15 @@ const DispatchPlanning = () => {
                           </div>
                           <div className="col-span-2">
                             <label className="block text-[10px] font-bold text-primary mb-1 uppercase">Godown Name</label>
-                            <select
+                            <SearchableDropdown
                               value={editData[key]?.godownName || order.godownName}
-                              onChange={(e) => handleEditChange(key, 'godownName', e.target.value)}
-                              className="w-full px-3 py-1.5 border border-green-200 rounded text-xs outline-none focus:border-primary bg-white"
-                            >
-                              {[...new Set([...GODOWNS, order.godownName])].map(g => (
-                                <option key={g} value={g}>{g}</option>
-                              ))}
-                            </select>
+                              onChange={(val) => handleEditChange(key, 'godownName', val)}
+                              options={godowns}
+                              placeholder="Select Godown"
+                              showAll={false}
+                              focusColor="primary"
+                              className="w-full h-8"
+                            />
                           </div>
                         </div>
                       )}

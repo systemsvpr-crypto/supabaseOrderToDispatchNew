@@ -26,6 +26,7 @@ import {
 } from "chart.js";
 import { Line } from "react-chartjs-2";
 import { useToast } from "../../contexts/ToastContext";
+import { supabase } from "../../supabaseClient";
 
 // Register ChartJS components
 ChartJS.register(
@@ -39,11 +40,7 @@ ChartJS.register(
   Filler
 );
 
-// Environment variables
-const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
-const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
-
-// --- Helper: safely get value from object using multiple possible keys ---
+// --- Helpers ---
 const getVal = (obj, ...possibleKeys) => {
   if (!obj || typeof obj !== "object") return null;
   for (const key of possibleKeys) {
@@ -57,67 +54,12 @@ const getVal = (obj, ...possibleKeys) => {
   return null;
 };
 
-// --- Helper: parse number safely ---
 const safeNumber = (val) => {
   const num = parseFloat(val);
   return isNaN(num) ? 0 : num;
 };
 
-// --- Fetcher for ORDER sheet ---
-const fetchOrderSheet = async (signal) => {
-  const url = new URL(API_URL);
-  url.searchParams.set("sheet", "ORDER");
-  url.searchParams.set("mode", "table");
-  if (SHEET_ID) url.searchParams.set("sheetId", SHEET_ID);
-
-  const response = await fetch(url.toString(), { signal });
-  const result = await response.json();
-
-  if (!result.success) return [];
-
-  const data = result.data.slice(4); // skip header rows
-  return data
-    .map((item, index) => ({
-      ...item,
-      originalIndex: index,
-      orderNo: item.orderNumber,
-      qty: item.qty || 0,
-      planningPendingQty: getVal(item, "planningPendingQty", "Planning Pending Qty", 12) || 0,
-    }))
-    .filter((item) => {
-      const hasQ =
-        item.columnQ !== undefined &&
-        item.columnQ !== null &&
-        String(item.columnQ).trim() !== "";
-      const hasR =
-        item.columnR !== undefined &&
-        item.columnR !== null &&
-        String(item.columnR).trim() !== "";
-      const pendingQty = safeNumber(item.planningPendingQty);
-      return hasQ && !hasR && pendingQty > 0;
-    });
-};
-
-// --- Fetcher for Planning sheet ---
-const fetchPlanningSheet = async (signal) => {
-  const url = new URL(API_URL);
-  url.searchParams.set("sheet", "Planning");
-  url.searchParams.set("mode", "table");
-  if (SHEET_ID) url.searchParams.set("sheetId", SHEET_ID);
-
-  const response = await fetch(url.toString(), { signal });
-  const result = await response.json();
-
-  if (!result.success) return [];
-
-  const data = result.data.slice(3); // skip header rows
-  return data.map((item) => ({
-    ...item,
-    orderNo: item.orderNumber || item.orderNo,
-  }));
-};
-
-// --- Main Dashboard Component ---
+// --- Dashboard Data Logic (Supabase) ---
 const Dashboard = () => {
   const { showToast } = useToast();
 
@@ -127,69 +69,100 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Abort controllers for pending requests
-  const abortControllerRef = useRef(null);
-
-  // Fetch all dashboard data
+  // Fetch all dashboard data from Supabase
   const fetchDashboardData = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
 
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    // Minimum display time for skeleton animation
-    const MIN_DISPLAY_MS = 1500;
-    const minTimer = new Promise((resolve) => setTimeout(resolve, MIN_DISPLAY_MS));
-
-    const fetchData = async () => {
-      const [ordersData, planData] = await Promise.all([
-        fetchOrderSheet(controller.signal),
-        fetchPlanningSheet(controller.signal)
-      ]);
-      return { ordersData, planData };
-    };
-
     try {
-      const [{ ordersData, planData }] = await Promise.all([
-        fetchData(),
-        minTimer
+      // 1. Fetch data from Supabase in parallel
+      const [ordersRes, plansRes] = await Promise.all([
+        supabase.from('app_orders').select('*').order('created_at', { ascending: false }),
+        supabase.from('dispatch_plans').select('*, order:app_orders(*)').order('created_at', { ascending: false })
       ]);
 
-      if (!controller.signal.aborted) {
-        setOrders(ordersData);
-        setPlanningData(planData);
-      }
+      if (ordersRes.error) throw ordersRes.error;
+      if (plansRes.error) throw plansRes.error;
+
+      const ordersRaw = ordersRes.data || [];
+      const plansRaw = plansRes.data || [];
+
+      // 2. Process data to emulate legacy structure for analytics compatibility
+      
+      // Map dispatch stats by order_id
+      const orderStats = {};
+      plansRaw.forEach(plan => {
+          const oid = plan.order_id;
+          if (!orderStats[oid]) {
+              orderStats[oid] = { planned: 0, cancel: 0, delivered: 0 };
+          }
+          const pQty = parseFloat(plan.planned_qty) || 0;
+          if (plan.status === 'Canceled') {
+              orderStats[oid].cancel += pQty;
+          } else {
+              orderStats[oid].planned += pQty;
+              if (plan.dispatch_completed) {
+                  orderStats[oid].delivered += pQty;
+              }
+          }
+      });
+
+      // Transform app_orders
+      const mappedOrders = ordersRaw.map(o => {
+          const stats = orderStats[o.id] || { planned: 0, cancel: 0, delivered: 0 };
+          return {
+              ...o,
+              orderDate: o.order_date,
+              clientName: o.client_name,
+              qty: parseFloat(o.qty) || 0,
+              planningQty: stats.planned,
+              cancelQty: stats.cancel,
+              qtyDelivered: stats.delivered,
+              planningPendingQty: Math.max(0, (parseFloat(o.qty) || 0) - stats.planned),
+              // Stage 1 emulation: column Q (available) and R (done)
+              columnQ: "Available",
+              columnR: (stats.planned > 0 || stats.cancel > 0) ? "Done" : null
+          };
+      });
+
+      // Transform dispatch_plans
+      const mappedPlanning = plansRaw.map(p => ({
+          ...p,
+          orderNo: p.order?.order_number || '-',
+          orderDate: p.order?.order_date,
+          clientName: p.order?.client_name,
+          godownName: p.godown_name,
+          dispatchQty: parseFloat(p.planned_qty) || 0,
+          // Stages 2-4 emulation based on record booleans
+          columnK: p.informed_before_dispatch ? "Done" : null,
+          columnL: p.informed_before_dispatch ? "Done" : null,
+          columnO: p.dispatch_completed ? "Done" : null,
+          columnP: p.dispatch_completed ? "Done" : null,
+          columnT: p.informed_after_dispatch ? "Done" : null,
+          columnU: p.informed_after_dispatch ? "Done" : null,
+      }));
+
+      // 3. Update state
+      setOrders(mappedOrders);
+      setPlanningData(mappedPlanning);
     } catch (error) {
-      if (error.name !== "AbortError") {
-        console.error("Failed to fetch dashboard data:", error);
-        showToast("Failed to load dashboard data", "error");
-      }
+      console.error("Failed to fetch dashboard data:", error);
+      showToast("Failed to load dashboard data", "error");
     } finally {
-      if (!controller.signal.aborted) {
-        setLoading(false);
-        setRefreshing(false);
-      }
+      setLoading(false);
+      setRefreshing(false);
     }
   }, [showToast]);
 
   // Initial load on mount
   useEffect(() => {
     fetchDashboardData();
-    return () => {
-      if (abortControllerRef.current) abortControllerRef.current.abort();
-    };
   }, [fetchDashboardData]);
 
   // Refresh
   const handleRefresh = useCallback(() => {
     fetchDashboardData(true);
   }, [fetchDashboardData]);
-
-  // ... (rest of the component remains identical, including stats, chart, and UI) ...
 
   // State for stats and chart data
   const [stats, setStats] = useState({
@@ -213,70 +186,45 @@ const Dashboard = () => {
   const [godownLoad, setGodownLoad] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Helper: count pending/completed based on column presence
-  const countStage = (items, pendingCol, completedCols) => {
-    let pending = 0;
-    let completed = 0;
-    const compCols = Array.isArray(completedCols) ? completedCols : [completedCols];
-
-    items.forEach((item) => {
-      const isCompleted = compCols.every((col) => {
-        const val = getVal(item, col);
-        return val !== undefined && val !== null && String(val).trim() !== "";
-      });
-
-      if (isCompleted) {
-        completed++;
-      } else {
-        pending++;
-      }
-    });
-    return { pending, completed };
-  };
-
   // Process orders data when it changes
   useEffect(() => {
-    if (!orders) return;
+    if (!orders || !planningData) return;
 
-    // Sums for cards
-    const orderQtySum = orders.reduce(
-      (sum, item) => sum + safeNumber(getVal(item, "planningQty")),
-      0
-    );
-    const cancelQtySum = orders.reduce(
-      (sum, item) => sum + safeNumber(getVal(item, "cancelQty")),
-      0
-    );
-    const remainingQtySum = orders.reduce(
-      (sum, item) => sum + safeNumber(getVal(item, "planningPendingQty")),
-      0
-    );
-    const deliveredQtySum = orders.reduce(
-      (sum, item) => sum + safeNumber(getVal(item, "qtyDelivered")),
-      0
-    );
+    // 1. Core Sums
+    const orderQtySum = orders.reduce((sum, item) => sum + item.qty, 0);
+    const cancelQtySum = planningData.reduce((sum, item) => sum + (item.status === 'Canceled' ? item.dispatchQty : 0), 0);
+    const deliveredQtySum = planningData.reduce((sum, item) => sum + (item.dispatch_completed && item.status !== 'Canceled' ? item.dispatchQty : 0), 0);
+    const remainingQtySum = orders.reduce((sum, item) => sum + item.planningPendingQty, 0);
 
-    // Stage 1: columns Q & R
-    const stage1 = countStage(orders, "columnQ", "columnR");
+    // 2. Stage 1: Planning
+    // Pending: Orders with remaining quantity
+    // Done: Total created dispatch plans (excluding canceled)
+    const pendingPlanning = orders.filter(o => o.planningPendingQty > 0).length;
+    const completedPlanning = planningData.filter(p => p.status !== 'Canceled').length;
 
-    // Build monthly client data: Map<client, Map<monthKey, stats>>
+    // 3. Stage 2: Inform Pre-Dispatch
+    const stage2Pending = planningData.filter(p => !p.informed_before_dispatch && p.status !== 'Canceled').length;
+    const stage2Done = planningData.filter(p => p.informed_before_dispatch && p.status !== 'Canceled').length;
+
+    // 4. Stage 3: Dispatch Completion
+    const stage3Pending = planningData.filter(p => !p.dispatch_completed && p.status !== 'Canceled').length;
+    const stage3Done = planningData.filter(p => p.dispatch_completed && p.status !== 'Canceled').length;
+
+    // 5. Stage 4: Inform Post-Dispatch
+    const stage4Pending = planningData.filter(p => !p.informed_after_dispatch && p.status !== 'Canceled').length;
+    const stage4Done = planningData.filter(p => p.informed_after_dispatch && p.status !== 'Canceled').length;
+
+    // 6. Build monthly trend data
     const monthlyMap = new Map();
-
     orders.forEach((order) => {
       const dateStr = order.orderDate;
       if (dateStr && dateStr !== "-") {
         const date = new Date(dateStr);
         if (!isNaN(date.getTime())) {
-          const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
-            2,
-            "0"
-          )}`;
+          const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
           const client = (order.clientName || "Unknown").trim();
-          const qty = safeNumber(order.qty);
-
-          if (!monthlyMap.has(client)) {
-            monthlyMap.set(client, new Map());
-          }
+          
+          if (!monthlyMap.has(client)) monthlyMap.set(client, new Map());
           const clientMonthMap = monthlyMap.get(client);
           const data = clientMonthMap.get(monthKey) || {
             qty: 0,
@@ -287,95 +235,51 @@ const Dashboard = () => {
             completedCount: 0,
           };
 
-          data.qty += qty;
-          data.planningQty += safeNumber(getVal(order, "planningQty"));
-          data.remainingQty += safeNumber(getVal(order, "planningPendingQty", "Planning Pending Qty", 12));
-          data.deliveredQty += safeNumber(getVal(order, "qtyDelivered"));
-          data.cancelQty += safeNumber(getVal(order, "cancelQty"));
-
-          // Completed if column R is not empty
-          if (order.columnR && String(order.columnR).trim() !== "") {
-            data.completedCount++;
-          }
+          data.qty += order.qty;
+          data.planningQty += order.planningQty;
+          data.remainingQty += order.planningPendingQty;
+          data.deliveredQty += order.qtyDelivered;
+          data.cancelQty += order.cancelQty;
+          if (order.planningPendingQty <= 0) data.completedCount++;
 
           clientMonthMap.set(monthKey, data);
         }
       }
     });
 
-    // Extract all unique month keys for continuous timeline
     const allMonths = new Set();
-    monthlyMap.forEach((monthMap) => {
-      for (const m of monthMap.keys()) {
-        allMonths.add(m);
-      }
-    });
-    const rawMonths = Array.from(allMonths).sort();
-    let sortedMonths = [];
-    if (rawMonths.length > 0) {
-      try {
-        const start = new Date(rawMonths[0] + "-01");
-        const end = new Date(rawMonths[rawMonths.length - 1] + "-01");
-        let current = new Date(start);
-        while (current <= end) {
-          const mKey = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(
-            2,
-            "0"
-          )}`;
-          sortedMonths.push(mKey);
-          current.setMonth(current.getMonth() + 1);
-        }
-      } catch (e) {
-        sortedMonths = rawMonths;
-      }
-    }
+    monthlyMap.forEach(mMap => mMap.forEach((_, k) => allMonths.add(k)));
+    const sortedMonths = Array.from(allMonths).sort();
 
     setAllMonthlyMap({ months: sortedMonths, clientData: monthlyMap });
-    setStats((prev) => ({
-      ...prev,
+    setStats({
       orderQtySum,
       cancelQtySum,
       remainingQtySum,
       deliveredQtySum,
-      pendingPlanning: stage1.pending,
-      completedPlanning: stage1.completed,
-    }));
-  }, [orders]);
-
-  // Process planning data when it changes
-  useEffect(() => {
-    if (!planningData) return;
-
-    // Stages based on columns (same as in DispatchPlanning)
-    const stage2 = countStage(planningData, "columnK", "columnL");
-    const stage3 = countStage(planningData, "columnO", "columnP");
-    const stage4 = countStage(planningData, "columnT", "columnU");
-
-    setStats((prev) => ({
-      ...prev,
-      pendingNotification: stage2.pending,
-      completedNotification: stage2.completed,
-      pendingCompletion: stage3.pending,
-      completedCompletion: stage3.completed,
-      pendingPostNotify: stage4.pending,
-      fullyCompleted: stage4.completed,
-    }));
-
-    // Godown load
-    const godownMap = new Map();
-    planningData.forEach((item) => {
-      const godown = item.godownName || "Unassigned";
-      const qty = safeNumber(item.dispatchQty);
-      if (qty > 0) {
-        godownMap.set(godown, (godownMap.get(godown) || 0) + qty);
-      }
+      pendingPlanning,
+      completedPlanning,
+      pendingNotification: stage2Pending,
+      completedNotification: stage2Done,
+      pendingCompletion: stage3Pending,
+      completedCompletion: stage3Done,
+      pendingPostNotify: stage4Pending,
+      fullyCompleted: stage4Done,
     });
 
-    const godownArray = Array.from(godownMap.entries())
+    // 7. Godown load calculation
+    const godownMap = new Map();
+    planningData.forEach((item) => {
+      if (item.status !== 'Canceled' && item.dispatchQty > 0) {
+        const godown = item.godownName || "Unassigned";
+        godownMap.set(godown, (godownMap.get(godown) || 0) + item.dispatchQty);
+      }
+    });
+    setGodownLoad(Array.from(godownMap.entries())
       .map(([godown, total]) => ({ godown, total }))
-      .sort((a, b) => b.total - a.total);
-    setGodownLoad(godownArray);
-  }, [planningData]);
+      .sort((a, b) => b.total - a.total));
+
+  }, [orders, planningData]);
 
   // Build chart data
   const monthlyTrendData = useMemo(() => {

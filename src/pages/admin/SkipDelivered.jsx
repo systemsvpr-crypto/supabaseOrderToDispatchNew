@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Save, Loader, Clock, History, ChevronDown, ChevronUp, RefreshCw, X, XCircle } from 'lucide-react';
 import SearchableDropdown from '../../components/SearchableDropdown';
 import { useToast } from '../../contexts/ToastContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../supabaseClient';
 
 // --- Skeleton Components ---
@@ -62,6 +63,7 @@ const SkipDelivered = () => {
   const [clientFilter, setClientFilter] = useState('');
   const [godownFilter, setGodownFilter] = useState('');
   const { showToast } = useToast();
+  const { user } = useAuth();
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -107,15 +109,16 @@ const SkipDelivered = () => {
     else setLoading(true);
 
     try {
-      // 1. Fetch Orders, Plans, and Stock/Godowns in parallel
-      const [ordersRes, plansRes, stockRes] = await Promise.all([
+      // 1. Fetch Orders, Plans, and Master Godowns in parallel
+      const [ordersRes, plansRes, godownsRes] = await Promise.all([
         supabase.from('app_orders').select('*').order('created_at', { ascending: false }),
         supabase.from('dispatch_plans').select('*'),
-        supabase.from('stock_levels').select('godown_name')
+        supabase.from('master_godowns').select('godown_name').order('godown_name')
       ]);
 
       if (ordersRes.error) throw ordersRes.error;
       if (plansRes.error) throw plansRes.error;
+      if (godownsRes.error) throw godownsRes.error;
 
       // Group plans by order_id to calculate sums
       const planSumMap = {};
@@ -123,7 +126,7 @@ const SkipDelivered = () => {
       plansRes.data.forEach(p => {
         if (p.order_id) {
           if (p.status === 'Canceled') return; // Do not include canceled dispatches in delivery/plan totals
-          
+
           const qty = parseFloat(p.planned_qty) || 0;
           planSumMap[p.order_id] = (planSumMap[p.order_id] || 0) + qty;
           if (p.dispatch_completed) {
@@ -137,7 +140,7 @@ const SkipDelivered = () => {
         const alreadyPlanned = planSumMap[item.id] || 0;
         const alreadyDelivered = deliveredSumMap[item.id] || 0;
         const remaining = (parseFloat(item.qty) || 0) - alreadyPlanned;
-        
+
         return {
           id: item.id,
           originalIndex: idx,
@@ -155,9 +158,9 @@ const SkipDelivered = () => {
         };
       }).filter(item => item.planningPendingQty > 0.001);
 
-      // Map History Items from completed plans
+      // Map History Items from completed plans that are NOT yet informed (as requested)
       const history = (plansRes.data || [])
-        .filter(p => p.dispatch_completed)
+        .filter(p => p.dispatch_completed && p.status !== 'Canceled' && !p.informed_before_dispatch && !p.informed_after_dispatch)
         .map((p, idx) => {
           const order = (ordersRes.data || []).find(o => o.id === p.order_id);
           return {
@@ -171,6 +174,7 @@ const SkipDelivered = () => {
             orderQty: order?.qty || '0',
             dispatchQty: p.planned_qty || '0',
             dispatchDate: p.planned_date || '-',
+            dispatchNo: p.dispatch_number || '-',
             godownName: p.godown_name || '-',
             skipped: true
           };
@@ -178,16 +182,16 @@ const SkipDelivered = () => {
 
       setPendingItems(pending);
       setHistoryItems(history);
-      
-      const uniqueGodowns = [...new Set((stockRes.data || []).map(s => s.godown_name))].sort();
+
+      const uniqueGodowns = (godownsRes.data || []).map(g => g.godown_name);
       setGodowns(uniqueGodowns);
 
     } catch (error) {
-       console.error('fetchAllData error:', error);
-       showToast(`Failed to load data: ${error.message}`, 'error');
+      console.error('fetchAllData error:', error);
+      showToast(`Failed to load data: ${error.message}`, 'error');
     } finally {
-        setLoading(false);
-        setRefreshing(false);
+      setLoading(false);
+      setRefreshing(false);
     }
   }, [showToast]);
 
@@ -201,50 +205,52 @@ const SkipDelivered = () => {
 
     setIsSaving(true);
     try {
-        const now = new Date().toISOString();
-        for (const orderId of ids) {
-            const order = pendingItems.find(o => o.id === orderId);
-            const edits = editData[orderId];
-            if (!order) continue;
+      const now = new Date().toISOString();
+      for (const indexKey of ids) {
+        const order = pendingItems.find(o => String(o.originalIndex) === String(indexKey));
+        const edits = editData[indexKey];
+        if (!order) continue;
 
-            const qtyToCancel = edits?.dispatchQty !== undefined ? parseFloat(edits.dispatchQty) : parseFloat(order.planningPendingQty);
-            if (qtyToCancel <= 0 || isNaN(qtyToCancel)) continue;
+        const dbOrderId = order.id; // Use the actual DB ID
+        const qtyToCancel = edits?.dispatchQty !== undefined ? parseFloat(edits.dispatchQty) : parseFloat(order.planningPendingQty);
+        if (qtyToCancel <= 0 || isNaN(qtyToCancel)) continue;
 
-            // 1. FIRST: Insert a "Canceled" plan record for tracking history
-            const { error: insErr } = await supabase
-                .from('dispatch_plans')
-                .insert({
-                    order_id: orderId,
-                    dispatch_number: `CXL-${Math.floor(Date.now()/1000)}`,
-                    planned_qty: qtyToCancel,
-                    planned_date: now.split('T')[0],
-                    godown_name: edits?.godown || order.godown,
-                    status: 'Canceled',
-                    gst_included: edits?.gstInc || 'No',
-                    dispatch_completed: true,
-                    informed_before_dispatch: true,
-                    informed_after_dispatch: true
-                });
-            if (insErr) throw insErr;
+        // 1. FIRST: Insert a "Canceled" plan record for tracking history
+        const { error: insErr } = await supabase
+          .from('dispatch_plans')
+          .insert({
+            order_id: dbOrderId,
+            dispatch_number: `CXL-${Math.floor(Date.now() / 1000)}`,
+            planned_qty: qtyToCancel,
+            planned_date: now.split('T')[0],
+            godown_name: edits?.godown || order.godown,
+            status: 'Canceled',
+            gst_included: edits?.gstInc || 'No',
+            submitted_by: user?.name || 'System',
+            dispatch_completed: true,
+            informed_before_dispatch: true,
+            informed_after_dispatch: true
+          });
+        if (insErr) throw insErr;
 
-            // 2. ONLY IF SUCCESSFUL: Permanently REDUCE the qty in the app_orders table
-            const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', orderId).single();
-            const newOrderTotal = (parseFloat(currentOrder?.qty) || 0) - qtyToCancel;
-            const { error: ordErr } = await supabase
-                .from('app_orders')
-                .update({ qty: newOrderTotal })
-                .eq('id', orderId);
-            if (ordErr) throw ordErr;
-        }
-        showToast('Orders updated and quantities permanently reduced.', 'success');
-        setSelectedRows({});
-        setEditData({});
-        handleRefresh();
+        // 2. ONLY IF SUCCESSFUL: Permanently REDUCE the qty in the app_orders table
+        const { data: currentOrder } = await supabase.from('app_orders').select('qty').eq('id', dbOrderId).single();
+        const newOrderTotal = (parseFloat(currentOrder?.qty) || 0) - qtyToCancel;
+        const { error: ordErr } = await supabase
+          .from('app_orders')
+          .update({ qty: newOrderTotal })
+          .eq('id', dbOrderId);
+        if (ordErr) throw ordErr;
+      }
+      showToast('Orders updated and quantities permanently reduced.', 'success');
+      setSelectedRows({});
+      setEditData({});
+      handleRefresh();
     } catch (err) {
-        console.error(err);
-        showToast(`Error: ${err.message}`, 'error');
+      console.error(err);
+      showToast(`Error: ${err.message}`, 'error');
     } finally {
-        setIsSaving(false);
+      setIsSaving(false);
     }
   };
 
@@ -320,17 +326,17 @@ const SkipDelivered = () => {
       return newState;
     });
     setEditData(prev => {
-       const newState = { ...prev };
-       if (isSelectedNow) {
-         const item = pendingItems.find(it => it.originalIndex === originalIdx);
-         newState[originalIdx] = {
-           dispatchQty: item?.planningPendingQty || '',
-           dispatchDate: new Date().toISOString().split('T')[0],
-           gstIncluded: 'No',
-           godown: item?.godown || ''
-         };
-       } else delete newState[originalIdx];
-       return newState;
+      const newState = { ...prev };
+      if (isSelectedNow) {
+        const item = pendingItems.find(it => it.originalIndex === originalIdx);
+        newState[originalIdx] = {
+          dispatchQty: item?.planningPendingQty || '',
+          dispatchDate: new Date().toISOString().split('T')[0],
+          gstIncluded: 'No',
+          godown: item?.godown || ''
+        };
+      } else delete newState[originalIdx];
+      return newState;
     });
   };
 
@@ -373,7 +379,7 @@ const SkipDelivered = () => {
       const now = new Date().toISOString();
       const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
       let maxNo = plans?.reduce((max, p) => {
-        const n = parseInt(p.dispatch_number.replace('DSP', ''), 10);
+        const n = parseInt(p.dispatch_number.replace(/^(DSP|DN-)/, ''), 10);
         return isNaN(n) ? max : Math.max(max, n);
       }, 1000) || 1000;
 
@@ -381,9 +387,9 @@ const SkipDelivered = () => {
         const item = pendingItems.find(it => String(it.originalIndex) === String(idx));
         const edit = editData[idx];
         if (!item || !edit) continue;
-        
+
         maxNo++;
-        const dNo = `DSP${maxNo}`;
+        const dNo = `DN-${maxNo}`;
 
         // 1. Create plan with all lifecycle flags set to true
         const { data: newPlan, error: pErr } = await supabase
@@ -395,11 +401,12 @@ const SkipDelivered = () => {
             planned_date: edit.dispatchDate,
             godown_name: edit.godown,
             dispatch_completed: true,
-            informed_before_dispatch: true,
+            informed_before_dispatch: false,
             informed_after_dispatch: false,
             status: 'Completed',
+            submitted_by: user?.name || 'System',
             completed_at: now,
-            informed_at: now
+            informed_at: null
           })
           .select().single();
 
@@ -416,6 +423,7 @@ const SkipDelivered = () => {
           godown_name: edit.godown,
           order_qty: parseFloat(item.orderQty) || 0,
           dispatch_qty: parseFloat(edit.dispatchQty) || 0,
+          crm_name: user?.name || 'System',
           status: 'Completed'
         });
       }
@@ -496,7 +504,7 @@ const SkipDelivered = () => {
                   { label: 'Rate', key: 'rate', align: 'right' },
                   { label: 'Order Qty', key: 'orderQty', align: 'right' },
                   ...(activeTab === 'pending' ? [{ label: 'Planning Qty', key: 'planningQty', align: 'right' }, { label: 'Pending Qty', key: 'planningPendingQty', align: 'right' }, { label: 'Qty Delivered', key: 'qtyDelivered', align: 'right' }] : []),
-                  ...(activeTab === 'history' ? [{ label: 'Dispatch Qty', key: 'dispatchQty', align: 'right' }, { label: 'Dispatch Date', key: 'dispatchDate', align: 'center' }, { label: 'Godown Name', key: 'godownName', align: 'center' }] : [])
+                  ...(activeTab === 'history' ? [{ label: 'Dispatch No', key: 'dispatchNo' }, { label: 'Dispatch Qty', key: 'dispatchQty', align: 'right' }, { label: 'Dispatch Date', key: 'dispatchDate', align: 'center' }, { label: 'Godown Name', key: 'godownName', align: 'center' }] : [])
                 ].map((col) => (
                   <th key={col.key} className={`px-6 py-4 cursor-pointer hover:bg-gray-100 transition-colors ${col.align === 'center' ? 'text-center' : col.align === 'right' ? 'text-right' : 'text-left'}`} onClick={() => requestSort(col.key)}>
                     <div className={`flex items-center gap-1 ${col.align === 'center' ? 'justify-center' : col.align === 'right' ? 'justify-end' : 'justify-start'}`}>
@@ -531,22 +539,170 @@ const SkipDelivered = () => {
                     <td className="px-6 py-4 text-gray-600 text-right">{item.rate}</td>
                     <td className="px-6 py-4 text-gray-600 text-right font-bold">{item.orderQty}</td>
                     {activeTab === 'pending' && (<><td className="px-6 py-4 font-bold text-primary text-right">{item.planningQty}</td><td className="px-6 py-4 text-gray-600 text-right">{item.planningPendingQty}</td><td className="px-6 py-4 text-gray-600 text-right">{item.qtyDelivered}</td></>)}
-                    {activeTab === 'history' && (<><td className="px-6 py-4 text-gray-600 text-right font-bold">{item.dispatchQty}</td><td className="px-6 py-4 text-gray-600 text-xs text-center">{formatDisplayDate(item.dispatchDate)}</td><td className="px-6 py-4 text-gray-600 text-center">{item.godownName}</td></>)}
+                    {activeTab === 'history' && (<><td className="px-6 py-4 text-gray-600 font-bold">{item.dispatchNo}</td><td className="px-6 py-4 text-gray-600 text-right font-bold">{item.dispatchQty}</td><td className="px-6 py-4 text-gray-600 text-xs text-center">{formatDisplayDate(item.dispatchDate)}</td><td className="px-6 py-4 text-gray-600 text-center">{item.godownName}</td></>)}
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
+        {/* Mobile View */}
         {loading && <MobileSkeleton />}
-        <div className="md:hidden divide-y divide-gray-200">
-           {!loading && filteredItems.map((item, idx) => (
-             <div key={idx} className="p-4 space-y-2">
-                <div className="flex justify-between font-bold"><span>{item.orderNumber}</span><span>{item.clientName}</span></div>
-                <div className="text-xs text-gray-500">{item.itemName}</div>
-             </div>
-           ))}
+        <div className="md:hidden space-y-3 p-1">
+          {!loading && filteredItems.length === 0 && (
+            <div className="bg-white p-10 text-center rounded-xl border border-dashed border-gray-200">
+              <p className="text-gray-400 italic text-sm">No items found.</p>
+            </div>
+          )}
+          {!loading && filteredItems.map((item, idx) => {
+            const originalIdx = item.originalIndex;
+            const isSelected = activeTab === 'pending' && !!selectedRows[originalIdx];
+            const edit = editData[originalIdx] || {};
+
+            return (
+              <div
+                key={idx}
+                className={`bg-white rounded-xl shadow-sm border transition-all overflow-hidden ${isSelected ? 'border-primary ring-1 ring-primary/20' : 'border-gray-100'
+                  }`}
+              >
+                <div className="p-4">
+                  {/* Card Header */}
+                  <div className="flex justify-between items-start mb-3">
+                    <div className="flex gap-3">
+                      {activeTab === 'pending' && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => handleCheckboxToggle(originalIdx)}
+                          className="mt-1 rounded text-primary focus:ring-primary w-5 h-5 cursor-pointer"
+                        />
+                      )}
+                      <div>
+                        <h4 className="font-bold text-gray-900 text-sm leading-tight">{item.clientName}</h4>
+                        <p className="text-[10px] text-gray-400 font-bold uppercase mt-0.5">Order: {item.orderNumber}</p>
+                      </div>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${activeTab === 'pending' ? 'bg-amber-50 text-amber-600 border border-amber-100' : 'bg-green-50 text-primary border border-green-100'
+                      }`}>
+                      {activeTab === 'pending' ? 'Pending' : 'Completed'}
+                    </span>
+                  </div>
+
+                  {/* Product Info */}
+                  <div className="bg-gray-50/50 rounded-lg p-2.5 mb-3 border border-gray-100/50">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase leading-none mb-1">Product</p>
+                    <p className="text-xs font-bold text-gray-700 leading-tight">{item.itemName}</p>
+                  </div>
+
+                  {/* Grid Data */}
+                  <div className="grid grid-cols-2 gap-4 mb-3">
+                    <div>
+                      <p className="text-[9px] font-bold text-gray-400 uppercase">Order Qty</p>
+                      <p className="text-xs font-bold text-gray-900">{item.orderQty}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[9px] font-bold text-gray-400 uppercase">Date</p>
+                      <p className="text-xs font-bold text-gray-900">{formatDisplayDate(activeTab === 'pending' ? item.orderDate : item.dispatchDate)}</p>
+                    </div>
+                  </div>
+
+                  {/* Quantity Breakdown (Pending Tab Only) */}
+                  {activeTab === 'pending' && (
+                    <div className="grid grid-cols-3 gap-2 py-2 border-t border-gray-50 border-dashed">
+                      <div className="text-center bg-blue-50/30 rounded p-1">
+                        <p className="text-[8px] font-bold text-blue-400 uppercase">Planned</p>
+                        <p className="text-[11px] font-black text-blue-600">{item.planningQty}</p>
+                      </div>
+                      <div className="text-center bg-amber-50/30 rounded p-1">
+                        <p className="text-[8px] font-bold text-amber-400 uppercase">Remaining</p>
+                        <p className="text-[11px] font-black text-amber-600">{item.planningPendingQty}</p>
+                      </div>
+                      <div className="text-center bg-green-50/30 rounded p-1">
+                        <p className="text-[8px] font-bold text-green-400 uppercase">Deliv</p>
+                        <p className="text-[11px] font-black text-green-600">{item.qtyDelivered}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Edit Form (if selected) */}
+                  {isSelected && (
+                    <div className="mt-4 pt-4 border-t border-gray-100 space-y-4 animate-in slide-in-from-top-2 duration-300">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[10px] font-bold text-primary mb-1 uppercase">Dispatch Qty</label>
+                          <input
+                            type="number"
+                            value={edit.dispatchQty || ''}
+                            onChange={(e) => handleEditChange(originalIdx, 'dispatchQty', e.target.value)}
+                            className="w-full px-3 py-2 border border-blue-100 rounded-lg text-xs outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary bg-blue-50/30 font-bold"
+                            placeholder="Qty"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-primary mb-1 uppercase">Dispatch Date</label>
+                          <input
+                            type="date"
+                            value={edit.dispatchDate || ''}
+                            onChange={(e) => handleEditChange(originalIdx, 'dispatchDate', e.target.value)}
+                            className="w-full px-3 py-2 border border-blue-100 rounded-lg text-xs outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary bg-blue-50/30 font-bold"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[10px] font-bold text-primary mb-1 uppercase">GST Included</label>
+                          <select
+                            value={edit.gstIncluded || 'No'}
+                            onChange={(e) => handleEditChange(originalIdx, 'gstIncluded', e.target.value)}
+                            className="w-full px-3 py-2 border border-blue-100 rounded-lg text-xs outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary bg-blue-50/30 font-bold"
+                          >
+                            <option value="Yes">Yes</option>
+                            <option value="No">No</option>
+                          </select>
+                        </div>
+                        <div className="flex flex-col justify-end">
+                          {/* Empty space or secondary info */}
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-primary mb-1 uppercase">Godown</label>
+                        <SearchableDropdown
+                          value={edit.godown || ''}
+                          onChange={(val) => handleEditChange(originalIdx, 'godown', val)}
+                          options={godowns}
+                          placeholder="Select Godown"
+                          showAll={false}
+                          className="w-full text-left"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Additional Labels for Completed Tab */}
+                  {activeTab === 'history' && (
+                    <div className="mt-3 pt-3 border-t border-gray-50 space-y-2 text-[10px]">
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-400 font-bold uppercase">Dispatch No:</span>
+                        <span className="text-gray-900 font-black bg-gray-100 px-2 py-0.5 rounded">{item.dispatchNo}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <span className="text-gray-400 font-bold uppercase mr-2">Godown:</span>
+                          <span className="text-gray-700 font-black">{item.godownName}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-400 font-bold uppercase mr-2">Disp Qty:</span>
+                          <span className="text-primary font-black">{item.dispatchQty}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
+
       </div>
     </div>
   );

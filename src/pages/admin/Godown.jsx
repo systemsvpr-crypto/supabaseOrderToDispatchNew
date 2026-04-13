@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Filter, ChevronUp, ChevronDown, RefreshCw } from 'lucide-react';
 import { useToast } from '../../contexts/ToastContext';
+import { supabase } from '../../supabaseClient';
 
 // --- Skeleton for table rows ---
 const TableSkeleton = () => (
   <>
     {[...Array(7)].map((_, i) => (
-      <tr key={i} className="border-b border-gray-100 last:border-0">
+      <tr key={i} className="border-b border-gray-100 last:border-0 h-16">
         {[...Array(9)].map((_, j) => (
           <td key={j} className="px-6 py-4">
             <div className="h-4 bg-gray-100 rounded-lg relative overflow-hidden">
@@ -26,26 +27,11 @@ const Godown = () => {
     const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
     const [isLoading, setIsLoading] = useState(true);
     const [isRefreshing, setIsRefreshing] = useState(false);
+    const [godownList, setGodownList] = useState([]);
     const abortControllerRef = useRef(null);
     const { showToast } = useToast();
 
-    const godownTabs = ['All', 'darba', 'DP', 'dusera', 'godown'];
-
-    const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
-    const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
-
-    // Helper to get value from object regardless of key casing/spaces
-    const getVal = (obj, ...possibleKeys) => {
-        if (!obj) return undefined;
-        const keys = Object.keys(obj);
-        for (const pKey of possibleKeys) {
-            if (obj[pKey] !== undefined) return obj[pKey];
-            const normalizedPKey = pKey.toLowerCase().replace(/[^a-z0-9]/g, '');
-            const foundKey = keys.find(k => k.toLowerCase().replace(/[^a-z0-9]/g, '') === normalizedPKey);
-            if (foundKey) return obj[foundKey];
-        }
-        return undefined;
-    };
+    const godownTabs = useMemo(() => ['All', ...godownList], [godownList]);
 
     const formatDisplayDate = (dateStr) => {
         if (!dateStr || dateStr === '-') return '-';
@@ -60,69 +46,69 @@ const Godown = () => {
         } catch { return dateStr; }
     };
 
-    // Fetch Planning data
-    const fetchPlanning = useCallback(async (isRefresh = false) => {
-        if (abortControllerRef.current) abortControllerRef.current.abort();
-        const controller = new AbortController();
-        abortControllerRef.current = controller;
-
+    // Fetch Planning data from Supabase
+    const fetchGodownData = useCallback(async (isRefresh = false) => {
         if (isRefresh) setIsRefreshing(true);
         else setIsLoading(true);
 
-        const MIN_DISPLAY_MS = 1500;
-        const minTimer = new Promise(resolve => setTimeout(resolve, MIN_DISPLAY_MS));
-
-        const doFetch = async () => {
-            const url = new URL(API_URL);
-            url.searchParams.set('sheet', 'Planning');
-            url.searchParams.set('mode', 'table');
-            if (SHEET_ID) url.searchParams.set('sheetId', SHEET_ID);
-
-            const response = await fetch(url.toString(), { signal: controller.signal });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const result = await response.json();
-
-            if (result.success && Array.isArray(result.data)) {
-                return result.data.slice(3).map((item, idx) => ({
-                    originalIndex: idx,
-                    dispatchNo: getVal(item, 'dispatchNo', 'Dispatch No') || '-',
-                    dispatchDate: getVal(item, 'dispatchDate', 'Dispatch Date') || '-',
-                    orderNo: getVal(item, 'orderNumber', 'Order No', 'Order Number') || '-',
-                    customerName: getVal(item, 'clientName', 'Customer', 'Customer Name') || '-',
-                    productName: getVal(item, 'itemName', 'Product', 'Product Name') || '-',
-                    orderQty: getVal(item, 'qty', 'Order Qty') || '0',
-                    dispatchQty: getVal(item, 'dispatchQty', 'Dispatch Qty') || '0',
-                    godown: getVal(item, 'godownName', 'Godown') || '-',
-                    gstIncluded: getVal(item, 'gstIncluded', 'GST Included') || '-'
-                }));
-            }
-            return [];
-        };
-
         try {
-            const [mapped] = await Promise.all([doFetch(), minTimer]);
-            if (!controller.signal.aborted) setItems(mapped);
+            // 1. Fetch dispatch plans joined with app_orders
+            const { data: plans, error: plansError } = await supabase
+                .from('dispatch_plans')
+                .select(`
+                    *,
+                    order:app_orders(*)
+                `)
+                .order('created_at', { ascending: false });
+
+            if (plansError) throw plansError;
+
+            // 2. Fetch unique godowns for tabs
+            const { data: godowns, error: godownsError } = await supabase
+                .from('master_godowns')
+                .select('godown_name')
+                .order('godown_name');
+
+            if (godownsError) throw godownsError;
+
+            // 3. Update godown list for tabs
+            const uniqueGodowns = [...new Set((godowns || []).map(g => g.godown_name).filter(Boolean))];
+            setGodownList(uniqueGodowns);
+
+            // 4. Map the data and filter out canceled records
+            const mapped = (plans || [])
+                .filter(item => item.status !== 'Canceled')
+                .map((item, idx) => ({
+                    id: item.id,
+                    dispatchNo: item.dispatch_number || '-',
+                    dispatchDate: item.planned_date || '-',
+                    orderNo: item.order?.order_number || '-',
+                    customerName: item.order?.client_name || '-',
+                    productName: item.order?.item_name || '-',
+                    orderQty: item.order?.qty || '0',
+                    dispatchQty: item.planned_qty || '0',
+                    godown: item.godown_name || '-',
+                    gstIncluded: item.gst_included || '-',
+                    originalIndex: idx
+                }));
+
+            setItems(mapped);
         } catch (error) {
-            if (error.name !== 'AbortError') {
-                console.error('Error fetching planning data:', error);
-                showToast('Error', 'Failed to load warehouse data: ' + error.message);
-            }
+            console.error('Error fetching godown data:', error);
+            showToast('Error', 'Failed to load warehouse data: ' + error.message);
         } finally {
-            if (!controller.signal.aborted) {
-                setIsLoading(false);
-                setIsRefreshing(false);
-            }
+            setIsLoading(false);
+            setIsRefreshing(false);
         }
-    }, [API_URL, SHEET_ID, showToast]);
+    }, [showToast]);
 
     // Initial load on mount
     useEffect(() => {
-        fetchPlanning();
-        return () => { if (abortControllerRef.current) abortControllerRef.current.abort(); };
-    }, [fetchPlanning]);
+        fetchGodownData();
+    }, [fetchGodownData]);
 
     // Manual Refresh
-    const handleRefresh = useCallback(() => fetchPlanning(true), [fetchPlanning]);
+    const handleRefresh = useCallback(() => fetchGodownData(true), [fetchGodownData]);
 
     // Sorting logic
     const requestSort = (key) => {
@@ -168,7 +154,7 @@ const Godown = () => {
         if (tab === 'All') acc[tab] = items.length;
         else acc[tab] = items.filter(item => (item.godown || '').trim().toLowerCase() === tab.toLowerCase()).length;
         return acc;
-    }, {}), [items]);
+    }, {}), [items, godownTabs]);
 
     return (
         <div className="">
@@ -196,7 +182,7 @@ const Godown = () => {
                             placeholder="Search..."
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
-                            className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded focus:ring-primary focus:border-primary"
+                            className="w-full pl-10 pr-4 py-2 bg-gray-50 border border-gray-200 rounded focus:ring-primary focus:border-primary shrink-0"
                         />
                         <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
@@ -225,7 +211,7 @@ const Godown = () => {
                 <div className="overflow-x-auto scrollbar-thin max-h-[500px]">
                     <table className="w-full text-left border-collapse min-w-[1200px]">
                         <thead>
-                            <tr className="bg-gray-50 border-b border-gray-200 text-xs uppercase text-gray-600 font-bold sticky top-0 z-10">
+                            <tr className="bg-gray-50 border-b border-gray-200 text-xs uppercase text-gray-600 font-bold sticky top-0 z-10 shadow-sm">
                                 {[
                                     { label: 'Dispatch No', key: 'dispatchNo' },
                                     { label: 'Dispatch Date', key: 'dispatchDate', align: 'center' },
@@ -262,21 +248,18 @@ const Godown = () => {
                                 </tr>
                             ) : null}
                             {!isLoading && filteredAndSortedItems.map((item, idx) => (
-                                <tr key={idx} className="hover:bg-gray-50">
+                                <tr key={idx} className="hover:bg-gray-50 transition-colors">
                                     <td className="px-6 py-4 font-semibold text-gray-900">{item.dispatchNo}</td>
-                                    <td className="px-6 py-4 text-gray-600 text-xs text-center">{formatDisplayDate(item.dispatchDate)}</td>
-                                    <td className="px-6 py-4 text-gray-600">{item.orderNo}</td>
-                                    <td className="px-6 py-4 font-medium text-gray-800">{item.customerName}</td>
-                                    <td className="px-6 py-4 text-gray-600">{item.productName}</td>
-                                    <td className="px-6 py-4 text-gray-600 text-right">{item.orderQty}</td>
-                                    <td className="px-6 py-4 text-gray-600 font-bold text-primary text-right">{item.dispatchQty}</td>
-                                    <td className="px-6 py-4 text-gray-600 capitalize text-center">{item.godown}</td>
-                                    <td className="px-6 py-4 text-gray-600 text-center">{item.gstIncluded}</td>
+                                    <td className="px-6 py-4 text-gray-600 text-[11px] font-medium text-center">{formatDisplayDate(item.dispatchDate)}</td>
+                                    <td className="px-6 py-4 text-gray-600 text-xs font-medium">{item.orderNo}</td>
+                                    <td className="px-6 py-4 font-bold text-gray-800">{item.customerName}</td>
+                                    <td className="px-6 py-4 text-gray-600 font-medium">{item.productName}</td>
+                                    <td className="px-6 py-4 text-gray-600 text-right font-medium">{item.orderQty}</td>
+                                    <td className="px-6 py-4 text-primary text-right font-black text-base">{item.dispatchQty}</td>
+                                    <td className="px-6 py-4 text-gray-600 capitalize text-center font-bold text-xs">{item.godown}</td>
+                                    <td className="px-6 py-4 text-gray-600 text-center font-bold text-[10px]">{item.gstIncluded}</td>
                                 </tr>
                             ))}
-                            {filteredAndSortedItems.length === 0 && !isLoading && (
-                                <tr><td colSpan="9" className="px-4 py-20 text-center text-gray-500 italic">No entries found.</td></tr>
-                            )}
                         </tbody>
                     </table>
                 </div>
@@ -285,7 +268,7 @@ const Godown = () => {
             {/* Refresh progress bar */}
             {isRefreshing && (
                 <div className="fixed top-0 left-0 right-0 h-1 z-[101] bg-gray-100 overflow-hidden">
-                    <div className="h-full bg-primary animate-shimmer-fast" style={{ width: '40%' }}></div>
+                    <div className="h-full bg-primary animate-progress-loading shadow-[0_0_10px_rgba(88,204,2,0.5)]"></div>
                 </div>
             )}
         </div>
