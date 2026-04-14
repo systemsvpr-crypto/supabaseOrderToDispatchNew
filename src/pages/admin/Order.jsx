@@ -43,39 +43,59 @@ const Order = () => {
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
   const [initialLoading, setInitialLoading] = useState(true);
 
+  // --- External Sheets Data ---
+  const [loadingStock, setLoadingStock] = useState(false);
+  const [loadingIntransit, setLoadingIntransit] = useState(false);
+  const [stockDataMap, setStockDataMap] = useState({});
+  const [intransitDataMap, setIntransitDataMap] = useState({});
+
   const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
   const MASTER_URL = import.meta.env.VITE_MASTER_URL;
   const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
+  const STOCK_LIST_API = import.meta.env.VITE_STOCK_LIST_API;
+  const INDENT_API = import.meta.env.VITE_INDENT_API;
 
   // Abort controller for ongoing fetch
   const abortControllerRef = useRef(null);
 
-  // --- Fetch orders and real-time stock from Supabase ---
+  const fetchStockData = useCallback(async () => {
+    setLoadingStock(true);
+    try {
+      const { data, error } = await supabase
+        .from('stock_levels')
+        .select('item_name, godown_name, closing_stock');
+      
+      if (error) throw error;
+
+      const sMap = {};
+      (data || []).forEach(row => {
+        const key = `${String(row.item_name || "").trim().toLowerCase()}|${String(row.godown_name || "").trim().toLowerCase()}`;
+        sMap[key] = row.closing_stock || 0;
+      });
+      setStockDataMap(sMap);
+    } catch (err) {
+      console.error("Supabase stock fetch error:", err);
+    } finally {
+      setLoadingStock(false);
+    }
+  }, []);
+
+  // --- Fetch orders from Supabase ---
   const fetchOrdersData = useCallback(async (isRefresh = false) => {
     if (isRefresh) setIsRefreshingOrders(true);
     else setIsLoadingOrders(true);
 
     try {
-      // 1. Fetch Orders, Stock Levels, and Canceled Plans in parallel
-      const [ordersRes, stockRes, cancelRes] = await Promise.all([
+      // 1. Fetch only Orders and Canceled Plans from Supabase (FAST)
+      const [ordersRes, cancelRes] = await Promise.all([
         supabase.from('app_orders').select('*').order('created_at', { ascending: false }),
-        supabase.from('stock_levels').select('item_name, godown_name, closing_stock'),
         supabase.from('dispatch_plans').select('order_id, planned_qty').eq('status', 'Canceled')
       ]);
  
       if (ordersRes.error) throw ordersRes.error;
-      if (stockRes.error) throw stockRes.error;
       if (cancelRes.error) throw cancelRes.error;
 
-      // 2. Create a quick lookup map for stock
-      // Key: "itemname|godownname" (lowercase + trimmed)
-      const stockMap = {};
-      stockRes.data.forEach(s => {
-        const key = `${String(s.item_name).trim().toLowerCase()}|${String(s.godown_name).trim().toLowerCase()}`;
-        stockMap[key] = s.closing_stock;
-      });
-
-      // 3. Create lookup for Canceled quantities
+      // 2. Create lookup for Canceled quantities
       const cancelMap = {};
       cancelRes.data.forEach(c => {
         if (c.order_id) {
@@ -83,18 +103,8 @@ const Order = () => {
         }
       });
       
-      console.log('Available Stock Keys in Database:', Object.keys(stockMap));
-
-      // 3. Map orders and inject real-time stock
-      const mappedOrders = ordersRes.data.map((item, idx) => {
-        const orderItemKey = `${String(item.item_name || '').trim().toLowerCase()}|${String(item.godown_name || '').trim().toLowerCase()}`;
-        const realTimeStock = stockMap[orderItemKey] !== undefined ? stockMap[orderItemKey] : '-';
-
-        // Help user debug in console
-        if (idx === 0 || (item.item_name && item.item_name.includes('100 No'))) {
-           console.log(`Stock Lookup Debug - Order Item: [${item.item_name}] Godown: [${item.godown_name}] -> Key: [${orderItemKey}] Match Found: ${stockMap[orderItemKey] !== undefined}`);
-        }
-
+      // 3. Map orders immediately
+      const mappedOrders = (ordersRes.data || []).map((item) => {
         return {
           id: item.id,
           orderNumber: item.order_number || '-',
@@ -105,14 +115,15 @@ const Order = () => {
           rate: item.rate || '0',
           qty: item.qty || '0',
           canceledQty: cancelMap[item.id] || 0,
-          currentStock: realTimeStock,
-          intransitQty: item.intransit_qty || '0',
           createdBy: item.submittedby || '-'
         };
       });
 
       setOrders(mappedOrders);
       
+      // 4. Start background fetch for Stock data from Supabase
+      fetchStockData();
+
       // Auto-set next order number in form if empty
       setFormData(prev => ({
           ...prev,
@@ -126,7 +137,7 @@ const Order = () => {
       setIsRefreshingOrders(false);
       setInitialLoading(false);
     }
-  }, [showToast]);
+  }, [showToast, fetchStockData]);
 
   // --- Fetch master data from Supabase ---
   const fetchMasterData = useCallback(async () => {
@@ -220,7 +231,14 @@ const Order = () => {
 
   const filteredAndSortedOrders = useMemo(() => {
     if (!orders) return [];
-    const filtered = orders.filter(order => {
+    const filtered = orders.map(order => {
+      const dataKey = `${String(order.itemName || "").trim().toLowerCase()}|${String(order.godownName || "").trim().toLowerCase()}`;
+      return {
+        ...order,
+        currentStock: stockDataMap[dataKey] !== undefined ? stockDataMap[dataKey] : '-',
+        intransitQty: intransitDataMap[dataKey] !== undefined ? intransitDataMap[dataKey] : '0'
+      };
+    }).filter(order => {
       const matchesSearch = Object.values(order).some(val =>
         String(val).toLowerCase().includes(searchTerm.toLowerCase())
       );
@@ -229,7 +247,7 @@ const Order = () => {
       return matchesSearch && matchesClient && matchesGodown;
     });
     return getSortedItems(filtered);
-  }, [orders, searchTerm, clientFilter, godownFilter, getSortedItems]);
+  }, [orders, searchTerm, clientFilter, godownFilter, stockDataMap, intransitDataMap, getSortedItems]);
 
   // --- Form handlers ---
   const handleAddItem = () => {
@@ -625,8 +643,20 @@ const Order = () => {
                     <td className="px-6 py-4 font-medium text-right text-slate-500">₹{order.rate}</td>
                     <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
                     <td className="px-6 py-4 text-right font-black text-red-500 text-sm italic">{order.canceledQty > 0 ? `-${order.canceledQty}` : '0'}</td>
-                    <td className="px-6 py-4 text-gray-500 text-[11px] font-bold text-right bg-slate-50/50">{order.currentStock}</td>
-                    <td className="px-6 py-4 text-gray-500 text-[11px] font-bold text-right">{order.intransitQty}</td>
+                    <td className="px-6 py-4 text-gray-500 text-[11px] font-bold text-right bg-slate-50/50">
+                      {loadingStock ? (
+                        <RefreshCw size={12} className="animate-spin inline text-primary/40" />
+                      ) : (
+                        order.currentStock
+                      )}
+                    </td>
+                    <td className="px-6 py-4 text-gray-500 text-[11px] font-bold text-right">
+                      {loadingIntransit ? (
+                        <RefreshCw size={12} className="animate-spin inline text-primary/40" />
+                      ) : (
+                        order.intransitQty
+                      )}
+                    </td>
                     <td className="px-6 py-4 text-[10px] text-center text-gray-400 font-bold uppercase tracking-tighter italic whitespace-nowrap">{order.createdBy}</td>
                     <td className="px-6 py-4 text-center">
                       <button
@@ -683,6 +713,18 @@ const Order = () => {
                   <div className="bg-white p-3 rounded-xl border border-gray-100 flex flex-col items-center">
                     <p className="text-red-400 text-[8px] font-black uppercase tracking-tighter mb-1 leading-none">Rejected</p>
                     <p className="font-black text-red-500 text-lg">{order.canceledQty}</p>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-gray-100 flex flex-col items-center">
+                    <p className="text-gray-400 text-[8px] font-black uppercase tracking-tighter mb-1 leading-none">Stock</p>
+                    <p className="font-black text-gray-700 text-lg">
+                       {loadingStock ? <RefreshCw size={14} className="animate-spin text-primary/40" /> : (order.currentStock || '-')}
+                    </p>
+                  </div>
+                  <div className="bg-white p-3 rounded-xl border border-gray-100 flex flex-col items-center">
+                    <p className="text-gray-400 text-[8px] font-black uppercase tracking-tighter mb-1 leading-none">Intransit</p>
+                    <p className="font-black text-gray-700 text-lg">
+                       {loadingIntransit ? <RefreshCw size={14} className="animate-spin text-primary/40" /> : (order.intransitQty || '0')}
+                    </p>
                   </div>
                 </div>
                 <div className="flex items-center justify-between pt-2">

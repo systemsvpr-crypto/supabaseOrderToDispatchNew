@@ -9,6 +9,8 @@ import { supabase } from '../../supabaseClient';
 
 const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
 const SHEET_ID = import.meta.env.VITE_orderToDispatch_SHEET_ID;
+const STOCK_LIST_API = import.meta.env.VITE_STOCK_LIST_API;
+const INDENT_API = import.meta.env.VITE_INDENT_API;
 
 const getVal = (obj, ...possibleKeys) => {
   if (!obj || typeof obj !== 'object') return null;
@@ -133,6 +135,12 @@ const DispatchPlanning = () => {
   const [godowns, setGodowns] = useState([]);
   const [itemNames, setItemNames] = useState([]);
 
+  // --- External Sheets Data ---
+  const [loadingStock, setLoadingStock] = useState(false);
+  const [loadingIntransit, setLoadingIntransit] = useState(false);
+  const [stockDataMap, setStockDataMap] = useState({});
+  const [intransitDataMap, setIntransitDataMap] = useState({});
+
   const pendingAbortRef = useRef(null);
   const historyAbortRef = useRef(null);
 
@@ -159,52 +167,59 @@ const DispatchPlanning = () => {
     fetchMasterData();
   }, [fetchMasterData]);
 
+  const fetchStockData = useCallback(async () => {
+    setLoadingStock(true);
+    try {
+      const { data, error } = await supabase
+        .from('stock_levels')
+        .select('item_name, godown_name, closing_stock');
+      
+      if (error) throw error;
+
+      const sMap = {};
+      (data || []).forEach(row => {
+        const key = `${String(row.item_name || "").trim().toLowerCase()}|${String(row.godown_name || "").trim().toLowerCase()}`;
+        sMap[key] = row.closing_stock || 0;
+      });
+      setStockDataMap(sMap);
+    } catch (err) {
+      console.error("Supabase stock fetch error:", err);
+    } finally {
+      setLoadingStock(false);
+    }
+  }, []);
+
   const fetchPendingOrders = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshingOrders(true);
     else setLoadingOrders(true);
 
     try {
-      // 1. Fetch Orders and Stock Levels in parallel
-      const [ordersRes, stockRes] = await Promise.all([
-        supabase.from('app_orders').select('*').order('created_at', { ascending: false }),
-        supabase.from('stock_levels').select('item_name, godown_name, closing_stock')
-      ]);
+      // 1. Fetch only necessary fast data from Supabase
+      const { data: ordersData, error } = await supabase
+        .from('app_orders')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      if (ordersRes.error) throw ordersRes.error;
-      if (stockRes.error) throw stockRes.error;
+      if (error) throw error;
 
-      // 2. Create smart lookup map
-      const stockMap = {};
-      stockRes.data.forEach(s => {
-        const key = `${String(s.item_name).trim().toLowerCase()}|${String(s.godown_name).trim().toLowerCase()}`;
-        stockMap[key] = s.closing_stock;
-      });
-
-      // 3. Map orders and calculate real-time stock
-      const mapped = (ordersRes.data || []).map((item, index) => {
-        const stockKey = `${String(item.item_name || '').trim().toLowerCase()}|${String(item.godown_name || '').trim().toLowerCase()}`;
-        const realTimeStock = stockMap[stockKey] !== undefined ? stockMap[stockKey] : '-';
-
-        return {
-          id: item.id,
-          orderNo: item.order_number || '-',
-          orderDate: item.order_date,
-          clientName: item.client_name,
-          godownName: item.godown_name,
-          itemName: item.item_name,
-          rate: item.rate,
-          qty: item.qty || 0,
-          currentStock: realTimeStock,
-          intransitQty: item.intransit_qty || '0',
-          planningQty: 0,
-          planningPendingQty: item.qty || 0,
-          qtyDelivered: 0,
-          gstIncluded: item.gst_included || 'No',
-          originalIndex: index
-        };
-      });
+      // 2. Map orders immediately (without waiting for Sheets)
+      const mapped = (ordersData || []).map((item, index) => ({
+        id: item.id,
+        orderNo: item.order_number || '-',
+        orderDate: item.order_date,
+        clientName: item.client_name,
+        godownName: item.godown_name,
+        itemName: item.item_name,
+        rate: item.rate,
+        qty: item.qty || 0,
+        gstIncluded: item.gst_included || 'No',
+        originalIndex: index
+      }));
 
       setOrders(mapped);
+
+      // 3. Start background fetch for Stock data from Supabase
+      fetchStockData();
     } catch (error) {
       console.error('fetchPendingOrders error:', error);
       showToast('Error', 'Failed to load pending orders: ' + error.message);
@@ -212,7 +227,7 @@ const DispatchPlanning = () => {
       setLoadingOrders(false);
       setRefreshingOrders(false);
     }
-  }, [showToast]);
+  }, [showToast, fetchStockData]);
 
   const fetchPlanningHistory = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshingHistory(true);
@@ -520,11 +535,17 @@ const DispatchPlanning = () => {
       // The balance available to plan is what hasn't been put into a dispatch plan yet
       const remainingToPlan = totalOrderQty - totalAlreadyPlanned;
 
+      const dataKey = `${String(order.itemName || "").trim().toLowerCase()}|${String(order.godownName || "").trim().toLowerCase()}`;
+      const realTimeStock = stockDataMap[dataKey] !== undefined ? stockDataMap[dataKey] : '-';
+      const realTimeIntransit = intransitDataMap[dataKey] !== undefined ? intransitDataMap[dataKey] : '0';
+
       return {
         ...order,
         qtyDelivered: totalAlreadyDelivered,
         planningPendingQty: remainingToPlan > 0 ? remainingToPlan : 0,
-        alreadyPlannedSum: totalAlreadyPlanned
+        alreadyPlannedSum: totalAlreadyPlanned,
+        currentStock: realTimeStock,
+        intransitQty: realTimeIntransit
       };
     }).filter(order => {
       // CRITICAL: Show the order if there is still quantity left to plan (remaining > 0)
@@ -950,8 +971,20 @@ const DispatchPlanning = () => {
                           <td className="px-6 py-4 font-semibold text-gray-700">{order.itemName}</td>
                           <td className="px-6 py-4 text-right text-slate-500 font-medium">₹{order.rate}</td>
                           <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
-                          <td className="px-6 py-4 text-right text-xs font-bold text-gray-500 bg-slate-50/50">{order.currentStock || '-'}</td>
-                          <td className="px-6 py-4 text-right font-bold text-gray-500">{order.intransitQty || '0'}</td>
+                          <td className="px-6 py-4 text-right text-xs font-bold text-gray-500 bg-slate-50/50">
+                            {loadingStock ? (
+                              <RefreshCw size={12} className="animate-spin inline text-primary/40" />
+                            ) : (
+                              order.currentStock || '-'
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-right font-bold text-gray-500">
+                            {loadingIntransit ? (
+                              <RefreshCw size={12} className="animate-spin inline text-primary/40" />
+                            ) : (
+                              order.intransitQty || '0'
+                            )}
+                          </td>
                           <td className="px-6 py-4 text-right font-bold text-gray-500">{order.planningQty || '0'}</td>
                           <td className="px-6 py-4 text-right font-bold text-primary">{order.planningPendingQty || '0'}</td>
                           <td className="px-6 py-4 text-right font-bold text-green-600">{order.qtyDelivered || '0'}</td>
@@ -1057,11 +1090,15 @@ const DispatchPlanning = () => {
                         </div>
                         <div className="bg-gray-50 p-1 rounded border border-gray-100">
                           <p className="uppercase text-[8px] font-bold text-gray-400">Stock</p>
-                          <p className="font-bold text-gray-700 leading-tight">{order.currentStock || '-'}</p>
+                          <p className="font-bold text-gray-700 leading-tight">
+                            {loadingStock ? <RefreshCw size={10} className="animate-spin" /> : (order.currentStock || '-')}
+                          </p>
                         </div>
                         <div className="bg-gray-50 p-1 rounded border border-gray-100">
                           <p className="uppercase text-[8px] font-bold text-gray-400">Intransit</p>
-                          <p className="font-bold text-gray-700">{order.intransitQty || '0'}</p>
+                          <p className="font-bold text-gray-700">
+                            {loadingIntransit ? <RefreshCw size={10} className="animate-spin" /> : (order.intransitQty || '0')}
+                          </p>
                         </div>
                         <div className="bg-gray-50 p-1 rounded border border-gray-100">
                           <p className="uppercase text-[8px] font-bold text-gray-400">Plan Qty</p>

@@ -72,6 +72,37 @@ const SkipDelivered = () => {
   const [godowns, setGodowns] = useState([]);
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
 
+  // --- Real-time Stock fetching from Sheets ---
+  const [loadingStock, setLoadingStock] = useState(false);
+  const [loadingIntransit, setLoadingIntransit] = useState(false);
+  const [stockDataMap, setStockDataMap] = useState({});
+  const [intransitDataMap, setIntransitDataMap] = useState({});
+
+  const STOCK_LIST_API = import.meta.env.VITE_STOCK_LIST_API;
+  const INDENT_API = import.meta.env.VITE_INDENT_API;
+
+  const fetchStockData = useCallback(async () => {
+    setLoadingStock(true);
+    try {
+      const { data, error } = await supabase
+        .from('stock_levels')
+        .select('item_name, godown_name, closing_stock');
+      
+      if (error) throw error;
+
+      const sMap = {};
+      (data || []).forEach(row => {
+        const key = `${String(row.item_name || "").trim().toLowerCase()}|${String(row.godown_name || "").trim().toLowerCase()}`;
+        sMap[key] = row.closing_stock || 0;
+      });
+      setStockDataMap(sMap);
+    } catch (err) {
+      console.error("Supabase stock fetch error:", err);
+    } finally {
+      setLoadingStock(false);
+    }
+  }, []);
+
   // Format date for display (e.g., 25-Feb-2026)
   const formatDisplayDate = (dateStr) => {
     if (!dateStr || dateStr === '-') return '-';
@@ -141,6 +172,8 @@ const SkipDelivered = () => {
         const alreadyDelivered = deliveredSumMap[item.id] || 0;
         const remaining = (parseFloat(item.qty) || 0) - alreadyPlanned;
 
+        const dataKey = `${String(item.item_name || "").trim().toLowerCase()}|${String(item.godown_name || "").trim().toLowerCase()}`;
+        
         return {
           id: item.id,
           originalIndex: idx,
@@ -151,7 +184,8 @@ const SkipDelivered = () => {
           itemName: item.item_name || '-',
           rate: item.rate || '0',
           orderQty: item.qty || '0',
-          currentStock: '-', // Calculated separately if needed
+          currentStock: stockDataMap[dataKey] !== undefined ? stockDataMap[dataKey] : '-',
+          intransitQty: intransitDataMap[dataKey] !== undefined ? intransitDataMap[dataKey] : '0',
           planningQty: alreadyPlanned,
           planningPendingQty: remaining > 0 ? remaining : 0,
           qtyDelivered: alreadyDelivered
@@ -192,8 +226,9 @@ const SkipDelivered = () => {
     } finally {
       setLoading(false);
       setRefreshing(false);
+      fetchStockData();
     }
-  }, [showToast]);
+  }, [showToast, fetchStockData]);
 
   const handleCancelSelected = async () => {
     const ids = Object.keys(selectedRows).filter(id => selectedRows[id]);
@@ -510,6 +545,8 @@ const SkipDelivered = () => {
                   { label: 'Item Name', key: 'itemName' },
                   { label: 'Rate', key: 'rate', align: 'right' },
                   { label: 'Order Qty', key: 'orderQty', align: 'right' },
+                  { label: 'Stock', key: 'currentStock', align: 'right' },
+                  { label: 'Intransit', key: 'intransitQty', align: 'right' },
                   ...(activeTab === 'pending' ? [{ label: 'Planning Qty', key: 'planningQty', align: 'right' }, { label: 'Pending Qty', key: 'planningPendingQty', align: 'right' }, { label: 'Qty Delivered', key: 'qtyDelivered', align: 'right' }] : []),
                   ...(activeTab === 'history' ? [{ label: 'Dispatch No', key: 'dispatchNo' }, { label: 'Dispatch Qty', key: 'dispatchQty', align: 'right' }, { label: 'Dispatch Date', key: 'dispatchDate', align: 'center' }, { label: 'Godown Name', key: 'godownName', align: 'center' }] : [])
                 ].map((col) => (
@@ -545,6 +582,12 @@ const SkipDelivered = () => {
                     <td className="px-6 py-4 text-gray-600">{item.itemName}</td>
                     <td className="px-6 py-4 text-gray-600 text-right">{item.rate}</td>
                     <td className="px-6 py-4 text-gray-600 text-right font-bold">{item.orderQty}</td>
+                    <td className="px-6 py-4 text-right text-[11px] font-bold text-gray-500 bg-gray-50/30">
+                      {loadingStock ? <RefreshCw size={12} className="animate-spin inline" /> : item.currentStock}
+                    </td>
+                    <td className="px-6 py-4 text-right text-[11px] font-bold text-gray-500">
+                      {loadingIntransit ? <RefreshCw size={12} className="animate-spin inline" /> : item.intransitQty}
+                    </td>
                     {activeTab === 'pending' && (<><td className="px-6 py-4 font-bold text-primary text-right">{item.planningQty}</td><td className="px-6 py-4 text-gray-600 text-right">{item.planningPendingQty}</td><td className="px-6 py-4 text-gray-600 text-right">{item.qtyDelivered}</td></>)}
                     {activeTab === 'history' && (<><td className="px-6 py-4 text-gray-600 font-bold">{item.dispatchNo}</td><td className="px-6 py-4 text-gray-600 text-right font-bold">{item.dispatchQty}</td><td className="px-6 py-4 text-gray-600 text-xs text-center">{formatDisplayDate(item.dispatchDate)}</td><td className="px-6 py-4 text-gray-600 text-center">{item.godownName}</td></>)}
                   </tr>
