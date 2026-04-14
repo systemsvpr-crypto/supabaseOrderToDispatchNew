@@ -23,8 +23,7 @@ const Order = () => {
   const [formData, setFormData] = useState({
     orderDate: new Date().toISOString().split('T')[0],
     clientName: '',
-    godownName: '',
-    items: [{ itemName: '', rate: '', qty: '' }],
+    items: [{ itemName: '', rate: '', qty: '', godownName: '' }],
     orderNo: ''
   });
 
@@ -48,6 +47,7 @@ const Order = () => {
   const [loadingIntransit, setLoadingIntransit] = useState(false);
   const [stockDataMap, setStockDataMap] = useState({});
   const [intransitDataMap, setIntransitDataMap] = useState({});
+  const [productGodownMap, setProductGodownMap] = useState({});
 
   const API_URL = import.meta.env.VITE_SHEET_orderToDispatch_URL;
   const MASTER_URL = import.meta.env.VITE_MASTER_URL;
@@ -58,24 +58,33 @@ const Order = () => {
   // Abort controller for ongoing fetch
   const abortControllerRef = useRef(null);
 
+  const normalize = useCallback((str) =>
+    String(str || "")
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ')   // remove extra spaces
+      .replace(/[^a-z0-9*]/g, ''), // remove special chars except *
+    []);
+
   const fetchStockData = useCallback(async () => {
     setLoadingStock(true);
     try {
       const { data, error } = await supabase
         .from('stock_levels')
-        .select('item_name, godown_name, closing_stock');
+        .select('item_name, godown_name, closing_stock')
+        .limit(5000);
       
       if (error) throw error;
 
       const sMap = {};
       (data || []).forEach(row => {
-        const item = String(row.item_name || "").trim().toLowerCase();
+        const item = normalize(row.item_name);
         const godown = String(row.godown_name || "").trim();
-        const stock = row.closing_stock || 0;
+        const stock = Number(row.closing_stock) || 0;
         
-        const displayGodown = godown;
+        const displayGodown = godown.toLowerCase() === 'godown' ? 'Gdn' : godown;
         if (!sMap[item]) sMap[item] = [];
-        sMap[item].push(`${displayGodown}: ${stock}`);
+        sMap[item].push(`${displayGodown}:${stock}`);
       });
       setStockDataMap(sMap);
     } catch (err) {
@@ -148,7 +157,7 @@ const Order = () => {
   const fetchMasterData = useCallback(async () => {
     try {
       const [productsRes, customersRes, godownsRes] = await Promise.all([
-        supabase.from('master_products').select('product_name').order('product_name'),
+        supabase.from('master_products').select('product_name, godown_name').order('product_name'),
         supabase.from('master_customers').select('customer_name').order('customer_name'),
         supabase.from('master_godowns').select('godown_name').order('godown_name')
       ]);
@@ -156,6 +165,12 @@ const Order = () => {
       if (productsRes.error) throw productsRes.error;
       if (customersRes.error) throw customersRes.error;
       if (godownsRes.error) throw godownsRes.error;
+
+      const mapping = {};
+      productsRes.data.forEach(p => {
+        if (p.product_name) mapping[p.product_name] = p.godown_name;
+      });
+      setProductGodownMap(mapping);
 
       setItemNames(productsRes.data.map(p => p.product_name));
       setClients(customersRes.data.map(c => c.customer_name));
@@ -237,8 +252,17 @@ const Order = () => {
   const filteredAndSortedOrders = useMemo(() => {
     if (!orders) return [];
     const filtered = orders.map(order => {
-      const itemKey = String(order.itemName || "").trim().toLowerCase();
-      const allStockInfo = stockDataMap[itemKey] ? stockDataMap[itemKey].join(', ') : '-';
+      const itemKey = normalize(order.itemName);
+      
+      let stockValues = stockDataMap[itemKey];
+      if (!stockValues) {
+          const stockEntry = Object.keys(stockDataMap).find(key =>
+            itemKey.includes(key) || key.includes(itemKey)
+          );
+          if (stockEntry) stockValues = stockDataMap[stockEntry];
+      }
+      
+      const allStockInfo = stockValues ? stockValues.join(', ') : '-';
       
       return {
         ...order,
@@ -260,7 +284,7 @@ const Order = () => {
   const handleAddItem = () => {
     setFormData(prev => ({
       ...prev,
-      items: [...prev.items, { itemName: '', rate: '', qty: '' }]
+      items: [...prev.items, { itemName: '', rate: '', qty: '', godownName: '' }]
     }));
   };
 
@@ -275,6 +299,12 @@ const Order = () => {
     setFormData(prev => {
       const newItems = [...prev.items];
       newItems[index][field] = value;
+
+      // Autofill godown for this specific item if item name is changed
+      if (field === 'itemName' && value && productGodownMap[value]) {
+        newItems[index].godownName = productGodownMap[value];
+      }
+
       return { ...prev, items: newItems };
     });
   };
@@ -351,7 +381,7 @@ const Order = () => {
       const rowsToInsert = formData.items.map(item => ({
         order_date: formData.orderDate,
         client_name: formData.clientName,
-        godown_name: formData.godownName,
+        godown_name: item.godownName || '-',
         order_number: formData.orderNo, // Use the generated number
         item_name: item.itemName,
         rate: parseFloat(item.rate) || 0,
@@ -369,8 +399,7 @@ const Order = () => {
       setFormData(prev => ({
         orderDate: new Date().toISOString().split('T')[0],
         clientName: '',
-        godownName: '',
-        items: [{ itemName: '', rate: '', qty: '' }],
+        items: [{ itemName: '', rate: '', qty: '', godownName: '' }],
         orderNo: calculateNextOrderNo(orders)
       }));
       setIsModalOpen(false);
@@ -532,7 +561,6 @@ const Order = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {/* Refresh button */}
             <button
               onClick={handleRefresh}
               disabled={isRefreshingOrders}
@@ -563,14 +591,12 @@ const Order = () => {
         </div>
       </div>
 
-      {/* Subtle Progress Bar when refreshing */}
       {(isLoadingOrders || isRefreshingOrders) && !initialLoading && (
         <div className="fixed top-0 left-0 w-full h-1 z-[101] bg-gray-100 overflow-hidden">
           <div className="h-full bg-primary animate-progress-loading shadow-[0_0_10px_rgba(88,204,2,0.5)]"></div>
         </div>
       )}
 
-      {/* Success overlay */}
       {showSuccessOverlay && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-gray-900/40 backdrop-blur-sm transition-all duration-300">
           <div className="bg-white px-10 py-8 rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.15)] flex flex-col items-center gap-5 animate-in zoom-in-95 fade-in duration-300 border border-gray-100">
@@ -586,9 +612,7 @@ const Order = () => {
         </div>
       )}
 
-      {/* Data table / cards */}
       <div className="bg-white rounded shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-white/50 overflow-hidden max-w-[1200px] mx-auto">
-        {/* Desktop table */}
         <div className="hidden md:block overflow-x-auto max-h-[500px] overflow-y-auto">
           <table className="w-full text-left border-collapse">
             <thead className="bg-gray-50/50 backdrop-blur-sm border-b border-gray-100 text-[10px] uppercase text-gray-400 font-black tracking-widest sticky top-0 z-10 shadow-sm">
@@ -650,7 +674,7 @@ const Order = () => {
                     <td className="px-6 py-4 font-medium text-right text-slate-500">₹{order.rate}</td>
                     <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
                     <td className="px-6 py-4 text-right font-black text-red-500 text-sm italic">{order.canceledQty > 0 ? `-${order.canceledQty}` : '0'}</td>
-                    <td className="px-6 py-4 text-gray-500 text-[10px] font-bold text-left bg-slate-50/50 whitespace-pre-wrap leading-tight">
+                    <td className="px-6 py-4 text-gray-500 text-[10px] font-bold text-left bg-slate-50/50">
                       {loadingStock ? (
                         <RefreshCw size={12} className="animate-spin inline text-primary/40" />
                       ) : (
@@ -681,7 +705,6 @@ const Order = () => {
           </table>
         </div>
 
-        {/* Mobile cards */}
         <div className="md:hidden divide-y divide-gray-200">
           {(isLoadingOrders || isRefreshingOrders) ? (
             <MobileSkeleton />
@@ -698,7 +721,7 @@ const Order = () => {
                 <div className="flex justify-between items-start">
                   <div>
                     <h4 className="font-black text-gray-900 text-lg leading-tight">{order.clientName}</h4>
-                    <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-1">{order.godownName}</p>
+                    <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mt-1">{order.godownName}</p>
                   </div>
                   <span className="px-3 py-1 bg-primary/10 text-primary rounded-lg text-[10px] font-black uppercase tracking-tighter">
                     #{order.orderNumber}
@@ -749,7 +772,6 @@ const Order = () => {
         </div>
       </div>
 
-      {/* Add Order Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-0 sm:p-6 transition-all duration-300">
           <div
@@ -810,16 +832,6 @@ const Order = () => {
                       showAll={false}
                     />
                   </div>
-                  <div className="space-y-1.5 md:col-span-1">
-                    <label className="text-xs font-bold text-gray-700 uppercase tracking-wide">Location / Godown</label>
-                    <SearchableDropdown
-                      value={formData.godownName}
-                      onChange={(val) => setFormData({ ...formData, godownName: val })}
-                      options={godowns}
-                      placeholder="Select Godown"
-                      showAll={false}
-                    />
-                  </div>
                 </div>
 
                 <div className="space-y-4">
@@ -840,7 +852,7 @@ const Order = () => {
                         style={{ animationDuration: '400ms' }}
                       >
                         <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 items-start">
-                          <div className="sm:col-span-6 space-y-1.5">
+                          <div className="sm:col-span-4 space-y-1.5">
                             <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Product / Item Name</label>
                             <SearchableDropdown
                               value={item.itemName}
@@ -849,9 +861,9 @@ const Order = () => {
                               placeholder="Select Product"
                               showAll={false}
                             />
-                            {item.itemName && stockDataMap[String(item.itemName).trim().toLowerCase()] && (
+                            {item.itemName && stockDataMap[normalize(item.itemName)] && (
                               <div className="mt-1.5 flex flex-wrap gap-1.5">
-                                {stockDataMap[String(item.itemName).trim().toLowerCase()].map((st, sIdx) => (
+                                {stockDataMap[normalize(item.itemName)].map((st, sIdx) => (
                                   <span key={sIdx} className="px-2 py-0.5 bg-slate-50 text-gray-500 rounded border border-gray-100 text-[9px] font-bold">
                                     {st}
                                   </span>
@@ -860,6 +872,16 @@ const Order = () => {
                             )}
                           </div>
                           <div className="sm:col-span-3 space-y-1.5">
+                            <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Location / Godown</label>
+                            <SearchableDropdown
+                              value={item.godownName}
+                              onChange={(val) => handleItemChange(index, 'godownName', val)}
+                              options={godowns}
+                              placeholder="Select Godown"
+                              showAll={false}
+                            />
+                          </div>
+                          <div className="sm:col-span-2 space-y-1.5">
                             <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Unit Price (₹)</label>
                             <input
                               type="number"

@@ -167,25 +167,52 @@ const DispatchPlanning = () => {
     fetchMasterData();
   }, [fetchMasterData]);
 
+  const normalize = useCallback((str) =>
+    String(str || "")
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ')   // remove extra spaces
+      .replace(/[^a-z0-9*]/g, ''), // remove special chars except *
+    []);
+
   const fetchStockData = useCallback(async () => {
     setLoadingStock(true);
     try {
       const { data, error } = await supabase
         .from('stock_levels')
-        .select('item_name, godown_name, closing_stock');
+        .select('item_name, godown_name, closing_stock')
+        .limit(5000);
       
       if (error) throw error;
 
       const sMap = {};
+      const analytics = {};
+
       (data || []).forEach(row => {
-        const item = String(row.item_name || "").trim().toLowerCase();
+        const rawItem = row.item_name || "Unknown";
+        if (!analytics[rawItem]) {
+          analytics[rawItem] = {
+            count: 0,
+            records: []
+          };
+        }
+        analytics[rawItem].count += 1;
+        analytics[rawItem].records.push(row);
+
+        const item = normalize(row.item_name);
         const godown = String(row.godown_name || "").trim();
-        const stock = row.closing_stock || 0;
+        const stock = Number(row.closing_stock) || 0;
         
-        const displayGodown = godown;
+        const displayGodown = godown.toLowerCase() === 'godown' ? 'Gdn' : godown;
         if (!sMap[item]) sMap[item] = [];
-        sMap[item].push(`${displayGodown}: ${stock}`);
+        sMap[item].push(`${displayGodown}:${stock}`);
       });
+
+      console.log("--- CONSOLIDATED STOCK ANALYTICS ---");
+      console.log("TOTAL RECORDS FETCHED:", (data || []).length);
+      console.log("STOCK BY PRODUCT (Unique name -> Count & Records):", analytics);
+      console.log("---------------------------------------");
+
       setStockDataMap(sMap);
     } catch (err) {
       console.error("Supabase stock fetch error:", err);
@@ -542,8 +569,19 @@ const DispatchPlanning = () => {
       // The balance available to plan is what hasn't been put into a dispatch plan yet
       const remainingToPlan = totalOrderQty - totalAlreadyPlanned;
 
-      const itemKey = String(order.itemName || "").trim().toLowerCase();
-      const allStockInfo = stockDataMap[itemKey] ? stockDataMap[itemKey].join(', ') : '-';
+      const itemKey = normalize(order.itemName);
+      
+      let stockValues = stockDataMap[itemKey];
+      if (!stockValues) {
+          const stockEntry = Object.keys(stockDataMap).find(key =>
+            itemKey.includes(key) || key.includes(itemKey)
+          );
+          if (stockEntry) {
+            stockValues = stockDataMap[stockEntry];
+          }
+      }
+      
+      const allStockInfo = stockValues ? stockValues.join(', ') : '-';
       const realTimeIntransit = intransitDataMap[`${itemKey}|${String(order.godownName || "").trim().toLowerCase()}`] !== undefined ? intransitDataMap[`${itemKey}|${String(order.godownName || "").trim().toLowerCase()}`] : '0';
 
       return {
@@ -978,7 +1016,7 @@ const DispatchPlanning = () => {
                           <td className="px-6 py-4 font-semibold text-gray-700">{order.itemName}</td>
                           <td className="px-6 py-4 text-right text-slate-500 font-medium">₹{order.rate}</td>
                           <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
-                          <td className="px-6 py-4 text-left text-[10px] font-bold text-gray-500 bg-slate-50/50 whitespace-pre-wrap leading-tight">
+                          <td className="px-6 py-4 text-left text-[10px] font-bold text-gray-500 bg-slate-50/50 leading-tight">
                             {loadingStock ? (
                               <RefreshCw size={12} className="animate-spin inline text-primary/40" />
                             ) : (

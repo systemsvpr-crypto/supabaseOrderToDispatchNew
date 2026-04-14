@@ -81,24 +81,33 @@ const SkipDelivered = () => {
   const STOCK_LIST_API = import.meta.env.VITE_STOCK_LIST_API;
   const INDENT_API = import.meta.env.VITE_INDENT_API;
 
+  const normalize = useCallback((str) =>
+    String(str || "")
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ')   // remove extra spaces
+      .replace(/[^a-z0-9*]/g, ''), // remove special chars except *
+    []);
+
   const fetchStockData = useCallback(async () => {
     setLoadingStock(true);
     try {
       const { data, error } = await supabase
         .from('stock_levels')
-        .select('item_name, godown_name, closing_stock');
+        .select('item_name, godown_name, closing_stock')
+        .limit(5000);
       
       if (error) throw error;
 
       const sMap = {};
       (data || []).forEach(row => {
-        const item = String(row.item_name || "").trim().toLowerCase();
+        const item = normalize(row.item_name);
         const godown = String(row.godown_name || "").trim();
-        const stock = row.closing_stock || 0;
+        const stock = Number(row.closing_stock) || 0;
         
-        const displayGodown = godown;
+        const displayGodown = godown.toLowerCase() === 'godown' ? 'Gdn' : godown;
         if (!sMap[item]) sMap[item] = [];
-        sMap[item].push(`${displayGodown}: ${stock}`);
+        sMap[item].push(`${displayGodown}:${stock}`);
       });
       setStockDataMap(sMap);
     } catch (err) {
@@ -177,8 +186,17 @@ const SkipDelivered = () => {
         const alreadyDelivered = deliveredSumMap[item.id] || 0;
         const remaining = (parseFloat(item.qty) || 0) - alreadyPlanned;
 
-        const itemKey = String(item.item_name || "").trim().toLowerCase();
-        const allStockInfo = stockDataMap[itemKey] ? stockDataMap[itemKey].join(', ') : '-';
+        const itemKey = normalize(item.item_name);
+        
+        let stockValues = stockDataMap[itemKey];
+        if (!stockValues) {
+            const stockEntry = Object.keys(stockDataMap).find(key =>
+              itemKey.includes(key) || key.includes(itemKey)
+            );
+            if (stockEntry) stockValues = stockDataMap[stockEntry];
+        }
+        
+        const allStockInfo = stockValues ? stockValues.join(', ') : '-';
         
         return {
           id: item.id,
@@ -602,7 +620,7 @@ const SkipDelivered = () => {
                     <td className="px-6 py-4 text-gray-600">{item.itemName}</td>
                     <td className="px-6 py-4 text-gray-600 text-right">{item.rate}</td>
                     <td className="px-6 py-4 text-gray-600 text-right font-bold">{item.orderQty}</td>
-                    <td className="px-6 py-4 text-left text-[10px] font-bold text-gray-500 bg-gray-50/30 whitespace-pre-wrap leading-tight">
+                    <td className="px-6 py-4 text-right text-[11px] font-bold text-gray-500">
                       {loadingStock ? <RefreshCw size={12} className="animate-spin inline" /> : item.currentStock}
                     </td>
                     <td className="px-6 py-4 text-right text-[11px] font-bold text-gray-500">
