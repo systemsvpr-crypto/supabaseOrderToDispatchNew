@@ -274,11 +274,11 @@ const Order = () => {
       const now = new Date().toISOString();
       const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
       const maxNo = (plans || []).reduce((max, p) => {
-        const n = parseInt(String(p.dispatch_number).replace('DSP', ''), 10);
+        const n = parseInt(String(p.dispatch_number).replace(/^(DSP|DN-)/, ''), 10);
         return isNaN(n) ? max : Math.max(max, n);
       }, 1000);
       
-      const newDNo = `DSP${maxNo + 1}-CXL`;
+      const newDNo = `DN-${maxNo + 1}-CXL`;
 
       // 1. FIRST: Create the history record in dispatch_plans
       const { error: insErr } = await supabase.from('dispatch_plans').insert({

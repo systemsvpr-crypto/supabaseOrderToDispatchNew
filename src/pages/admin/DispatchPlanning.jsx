@@ -297,7 +297,7 @@ const DispatchPlanning = () => {
     const locations = new Set();
     (orders || []).forEach(order => {
       if (order.currentStock) {
-        order.currentStock.split(',').forEach(part => {
+        String(order.currentStock).split(',').forEach(part => {
           const loc = part.split(':')[0].trim();
           if (loc) locations.add(loc);
         });
@@ -331,7 +331,7 @@ const DispatchPlanning = () => {
       const now = new Date().toISOString();
       const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
       let currentMaxNo = (plans || []).reduce((max, p) => {
-        const n = parseInt(String(p.dispatch_number).replace('DSP', ''), 10);
+        const n = parseInt(String(p.dispatch_number).replace(/^(DSP|DN-)/, ''), 10);
         return isNaN(n) ? max : Math.max(max, n);
       }, 1000);
 
@@ -364,7 +364,7 @@ const DispatchPlanning = () => {
         currentMaxNo++;
         cancelRecords.push({
           order_id: String(order.id),
-          dispatch_number: `DSP${currentMaxNo}-CXL`,
+          dispatch_number: `DN-${currentMaxNo}-CXL`,
           planned_qty: Number(qtyToCancel),
           planned_date: now.split('T')[0],
           godown_name: String(planningData.godownName || order.godownName || '-'),
@@ -421,7 +421,12 @@ const DispatchPlanning = () => {
     try {
       const now = new Date().toISOString();
       const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
-      const newDNo = `DSP${maxNo + 1}-CXL`;
+      const maxNo = (plans || []).reduce((max, p) => {
+        const n = parseInt(String(p.dispatch_number).replace(/^(DSP|DN-)/, ''), 10);
+        return isNaN(n) ? max : Math.max(max, n);
+      }, 1000);
+      const newDNo = `DN-${maxNo + 1}-CXL`;
+
       const { data: currentOrderData } = await supabase.from('app_orders').select('qty').eq('id', order.id).single();
       const newOrderTotal = (parseFloat(currentOrderData?.qty) || 0) - qtyToCancel;
 
@@ -601,7 +606,7 @@ const DispatchPlanning = () => {
       const allNos = (dispatchHistory || [])
         .map(h => h.dispatchNo || h.dispatch_number)
         .filter(no => no && (no.startsWith('DSP') || no.startsWith('DN-')))
-        .map(no => parseInt(no.replace(/^(DSP|DN-)/, ''), 10))
+        .map(no => parseInt(String(no).replace(/^(DSP|DN-)/, ''), 10))
         .filter(n => !isNaN(n));
       return allNos.length > 0 ? Math.max(...allNos) : 1000;
     })();

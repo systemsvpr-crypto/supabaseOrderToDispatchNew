@@ -215,12 +215,18 @@ const SkipDelivered = () => {
         const qtyToCancel = edits?.dispatchQty !== undefined ? parseFloat(edits.dispatchQty) : parseFloat(order.planningPendingQty);
         if (qtyToCancel <= 0 || isNaN(qtyToCancel)) continue;
 
+        const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
+        const maxNo = (plans || []).reduce((max, p) => {
+          const n = parseInt(String(p.dispatch_number).replace(/^(DSP|DN-)/, ''), 10);
+          return isNaN(n) ? max : Math.max(max, n);
+        }, 1000);
+
         // 1. FIRST: Insert a "Canceled" plan record for tracking history
         const { error: insErr } = await supabase
           .from('dispatch_plans')
           .insert({
             order_id: dbOrderId,
-            dispatch_number: `CXL-${Math.floor(Date.now() / 1000)}`,
+            dispatch_number: `DN-${maxNo + 1}-CXL`,
             planned_qty: qtyToCancel,
             planned_date: now.split('T')[0],
             godown_name: edits?.godown || order.godown,
@@ -379,7 +385,7 @@ const SkipDelivered = () => {
       const now = new Date().toISOString();
       const { data: plans } = await supabase.from('dispatch_plans').select('dispatch_number');
       let maxNo = plans?.reduce((max, p) => {
-        const n = parseInt(p.dispatch_number.replace(/^(DSP|DN-)/, ''), 10);
+        const n = parseInt(String(p.dispatch_number).replace(/^(DSP|DN-)/, ''), 10);
         return isNaN(n) ? max : Math.max(max, n);
       }, 1000) || 1000;
 

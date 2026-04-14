@@ -306,7 +306,7 @@ const DispatchComplete = () => {
 
       const { data: allPlans } = await supabase.from('dispatch_plans').select('dispatch_number');
       const maxNo = (allPlans || []).reduce((max, p) => {
-        const n = parseInt(String(p.dispatch_number).replace('DSP', ''), 10);
+        const n = parseInt(String(p.dispatch_number).replace(/^(DSP|DN-)/, ''), 10);
         return isNaN(n) ? max : Math.max(max, n);
       }, 1000);
 
@@ -329,7 +329,7 @@ const DispatchComplete = () => {
 
         const { error: inErr } = await supabase.from('dispatch_plans').insert({
           order_id: orderId,
-          dispatch_number: `DSP${maxNo + 1}-CXL`,
+          dispatch_number: `DN-${maxNo + 1}-CXL`,
           planned_qty: qtyToCancel,
           planned_date: item.dispatchDate,
           godown_name: item.godownName,
