@@ -92,8 +92,13 @@ const SkipDelivered = () => {
 
       const sMap = {};
       (data || []).forEach(row => {
-        const key = `${String(row.item_name || "").trim().toLowerCase()}|${String(row.godown_name || "").trim().toLowerCase()}`;
-        sMap[key] = row.closing_stock || 0;
+        const item = String(row.item_name || "").trim().toLowerCase();
+        const godown = String(row.godown_name || "").trim();
+        const stock = row.closing_stock || 0;
+        
+        const displayGodown = godown;
+        if (!sMap[item]) sMap[item] = [];
+        sMap[item].push(`${displayGodown}: ${stock}`);
       });
       setStockDataMap(sMap);
     } catch (err) {
@@ -172,7 +177,8 @@ const SkipDelivered = () => {
         const alreadyDelivered = deliveredSumMap[item.id] || 0;
         const remaining = (parseFloat(item.qty) || 0) - alreadyPlanned;
 
-        const dataKey = `${String(item.item_name || "").trim().toLowerCase()}|${String(item.godown_name || "").trim().toLowerCase()}`;
+        const itemKey = String(item.item_name || "").trim().toLowerCase();
+        const allStockInfo = stockDataMap[itemKey] ? stockDataMap[itemKey].join(', ') : '-';
         
         return {
           id: item.id,
@@ -184,8 +190,8 @@ const SkipDelivered = () => {
           itemName: item.item_name || '-',
           rate: item.rate || '0',
           orderQty: item.qty || '0',
-          currentStock: stockDataMap[dataKey] !== undefined ? stockDataMap[dataKey] : '-',
-          intransitQty: intransitDataMap[dataKey] !== undefined ? intransitDataMap[dataKey] : '0',
+          currentStock: allStockInfo,
+          intransitQty: intransitDataMap[`${itemKey}|${String(item.godown_name || "").trim().toLowerCase()}`] !== undefined ? intransitDataMap[`${itemKey}|${String(item.godown_name || "").trim().toLowerCase()}`] : '0',
           planningQty: alreadyPlanned,
           planningPendingQty: remaining > 0 ? remaining : 0,
           qtyDelivered: alreadyDelivered
@@ -344,9 +350,24 @@ const SkipDelivered = () => {
   }, [sortConfig]);
 
   const currentItems = activeTab === 'pending' ? pendingItems : historyItems;
-  const filteredItems = useMemo(() =>
-    getSortedItems(
-      currentItems.filter(item => {
+  const filteredItems = useMemo(() => {
+    const enriched = currentItems.map(item => {
+      if (activeTab === 'pending') {
+        const itemKey = String(item.itemName || "").trim().toLowerCase();
+        const allStockInfo = stockDataMap[itemKey] ? stockDataMap[itemKey].join(', ') : '-';
+        return {
+          ...item,
+          currentStock: allStockInfo,
+          intransitQty: intransitDataMap[`${itemKey}|${String(item.godown || "").trim().toLowerCase()}`] !== undefined 
+            ? intransitDataMap[`${itemKey}|${String(item.godown || "").trim().toLowerCase()}`] 
+            : '0'
+        };
+      }
+      return item;
+    });
+
+    return getSortedItems(
+       enriched.filter(item => {
         const matchesSearch = Object.values(item).some(val =>
           String(val).toLowerCase().includes(searchTerm.toLowerCase())
         );
@@ -354,9 +375,8 @@ const SkipDelivered = () => {
         const matchesGodown = !godownFilter || item.godown === godownFilter;
         return matchesSearch && matchesClient && matchesGodown;
       })
-    ),
-    [currentItems, searchTerm, clientFilter, godownFilter, getSortedItems]
-  );
+    );
+  }, [currentItems, searchTerm, clientFilter, godownFilter, getSortedItems, stockDataMap, intransitDataMap, activeTab]);
 
   const handleCheckboxToggle = (originalIdx) => {
     const isSelectedNow = !selectedRows[originalIdx];
@@ -582,7 +602,7 @@ const SkipDelivered = () => {
                     <td className="px-6 py-4 text-gray-600">{item.itemName}</td>
                     <td className="px-6 py-4 text-gray-600 text-right">{item.rate}</td>
                     <td className="px-6 py-4 text-gray-600 text-right font-bold">{item.orderQty}</td>
-                    <td className="px-6 py-4 text-right text-[11px] font-bold text-gray-500 bg-gray-50/30">
+                    <td className="px-6 py-4 text-left text-[10px] font-bold text-gray-500 bg-gray-50/30 whitespace-pre-wrap leading-tight">
                       {loadingStock ? <RefreshCw size={12} className="animate-spin inline" /> : item.currentStock}
                     </td>
                     <td className="px-6 py-4 text-right text-[11px] font-bold text-gray-500">

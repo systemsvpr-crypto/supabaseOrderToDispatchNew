@@ -178,8 +178,13 @@ const DispatchPlanning = () => {
 
       const sMap = {};
       (data || []).forEach(row => {
-        const key = `${String(row.item_name || "").trim().toLowerCase()}|${String(row.godown_name || "").trim().toLowerCase()}`;
-        sMap[key] = row.closing_stock || 0;
+        const item = String(row.item_name || "").trim().toLowerCase();
+        const godown = String(row.godown_name || "").trim();
+        const stock = row.closing_stock || 0;
+        
+        const displayGodown = godown;
+        if (!sMap[item]) sMap[item] = [];
+        sMap[item].push(`${displayGodown}: ${stock}`);
       });
       setStockDataMap(sMap);
     } catch (err) {
@@ -203,18 +208,20 @@ const DispatchPlanning = () => {
       if (error) throw error;
 
       // 2. Map orders immediately (without waiting for Sheets)
-      const mapped = (ordersData || []).map((item, index) => ({
-        id: item.id,
-        orderNo: item.order_number || '-',
-        orderDate: item.order_date,
-        clientName: item.client_name,
-        godownName: item.godown_name,
-        itemName: item.item_name,
-        rate: item.rate,
-        qty: item.qty || 0,
-        gstIncluded: item.gst_included || 'No',
-        originalIndex: index
-      }));
+      const mapped = (ordersData || []).map((item, index) => {
+        return {
+          id: item.id,
+          orderNo: item.order_number || '-',
+          orderDate: item.order_date,
+          clientName: item.client_name,
+          godownName: item.godown_name,
+          itemName: item.item_name,
+          rate: item.rate,
+          qty: item.qty || 0,
+          gstIncluded: item.gst_included || 'No',
+          originalIndex: index
+        };
+      });
 
       setOrders(mapped);
 
@@ -535,16 +542,16 @@ const DispatchPlanning = () => {
       // The balance available to plan is what hasn't been put into a dispatch plan yet
       const remainingToPlan = totalOrderQty - totalAlreadyPlanned;
 
-      const dataKey = `${String(order.itemName || "").trim().toLowerCase()}|${String(order.godownName || "").trim().toLowerCase()}`;
-      const realTimeStock = stockDataMap[dataKey] !== undefined ? stockDataMap[dataKey] : '-';
-      const realTimeIntransit = intransitDataMap[dataKey] !== undefined ? intransitDataMap[dataKey] : '0';
+      const itemKey = String(order.itemName || "").trim().toLowerCase();
+      const allStockInfo = stockDataMap[itemKey] ? stockDataMap[itemKey].join(', ') : '-';
+      const realTimeIntransit = intransitDataMap[`${itemKey}|${String(order.godownName || "").trim().toLowerCase()}`] !== undefined ? intransitDataMap[`${itemKey}|${String(order.godownName || "").trim().toLowerCase()}`] : '0';
 
       return {
         ...order,
         qtyDelivered: totalAlreadyDelivered,
         planningPendingQty: remainingToPlan > 0 ? remainingToPlan : 0,
         alreadyPlannedSum: totalAlreadyPlanned,
-        currentStock: realTimeStock,
+        currentStock: allStockInfo,
         intransitQty: realTimeIntransit
       };
     }).filter(order => {
@@ -565,7 +572,7 @@ const DispatchPlanning = () => {
       return matchesSearch && matchesClient && matchesGodown && matchesOrderNo && matchesItem && matchesDate && matchesStockLocation;
     });
     return getSortedItems(filtered);
-  }, [orders, dispatchHistory, searchTerm, clientFilter, godownFilter, orderNoFilter, itemFilter, dateFilter, stockLocationFilter, getSortedItems]);
+  }, [orders, dispatchHistory, searchTerm, clientFilter, godownFilter, orderNoFilter, itemFilter, dateFilter, stockLocationFilter, getSortedItems, stockDataMap, intransitDataMap]);
 
   const filteredAndSortedHistory = useMemo(() => {
     if (!dispatchHistory) return [];
@@ -971,7 +978,7 @@ const DispatchPlanning = () => {
                           <td className="px-6 py-4 font-semibold text-gray-700">{order.itemName}</td>
                           <td className="px-6 py-4 text-right text-slate-500 font-medium">₹{order.rate}</td>
                           <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
-                          <td className="px-6 py-4 text-right text-xs font-bold text-gray-500 bg-slate-50/50">
+                          <td className="px-6 py-4 text-left text-[10px] font-bold text-gray-500 bg-slate-50/50 whitespace-pre-wrap leading-tight">
                             {loadingStock ? (
                               <RefreshCw size={12} className="animate-spin inline text-primary/40" />
                             ) : (

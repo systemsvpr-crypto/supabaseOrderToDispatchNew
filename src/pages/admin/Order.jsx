@@ -69,8 +69,13 @@ const Order = () => {
 
       const sMap = {};
       (data || []).forEach(row => {
-        const key = `${String(row.item_name || "").trim().toLowerCase()}|${String(row.godown_name || "").trim().toLowerCase()}`;
-        sMap[key] = row.closing_stock || 0;
+        const item = String(row.item_name || "").trim().toLowerCase();
+        const godown = String(row.godown_name || "").trim();
+        const stock = row.closing_stock || 0;
+        
+        const displayGodown = godown;
+        if (!sMap[item]) sMap[item] = [];
+        sMap[item].push(`${displayGodown}: ${stock}`);
       });
       setStockDataMap(sMap);
     } catch (err) {
@@ -232,11 +237,13 @@ const Order = () => {
   const filteredAndSortedOrders = useMemo(() => {
     if (!orders) return [];
     const filtered = orders.map(order => {
-      const dataKey = `${String(order.itemName || "").trim().toLowerCase()}|${String(order.godownName || "").trim().toLowerCase()}`;
+      const itemKey = String(order.itemName || "").trim().toLowerCase();
+      const allStockInfo = stockDataMap[itemKey] ? stockDataMap[itemKey].join(', ') : '-';
+      
       return {
         ...order,
-        currentStock: stockDataMap[dataKey] !== undefined ? stockDataMap[dataKey] : '-',
-        intransitQty: intransitDataMap[dataKey] !== undefined ? intransitDataMap[dataKey] : '0'
+        currentStock: allStockInfo,
+        intransitQty: intransitDataMap[`${itemKey}|${String(order.godownName || "").trim().toLowerCase()}`] !== undefined ? intransitDataMap[`${itemKey}|${String(order.godownName || "").trim().toLowerCase()}`] : '0'
       };
     }).filter(order => {
       const matchesSearch = Object.values(order).some(val =>
@@ -643,7 +650,7 @@ const Order = () => {
                     <td className="px-6 py-4 font-medium text-right text-slate-500">₹{order.rate}</td>
                     <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
                     <td className="px-6 py-4 text-right font-black text-red-500 text-sm italic">{order.canceledQty > 0 ? `-${order.canceledQty}` : '0'}</td>
-                    <td className="px-6 py-4 text-gray-500 text-[11px] font-bold text-right bg-slate-50/50">
+                    <td className="px-6 py-4 text-gray-500 text-[10px] font-bold text-left bg-slate-50/50 whitespace-pre-wrap leading-tight">
                       {loadingStock ? (
                         <RefreshCw size={12} className="animate-spin inline text-primary/40" />
                       ) : (
@@ -842,6 +849,15 @@ const Order = () => {
                               placeholder="Select Product"
                               showAll={false}
                             />
+                            {item.itemName && stockDataMap[String(item.itemName).trim().toLowerCase()] && (
+                              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                {stockDataMap[String(item.itemName).trim().toLowerCase()].map((st, sIdx) => (
+                                  <span key={sIdx} className="px-2 py-0.5 bg-slate-50 text-gray-500 rounded border border-gray-100 text-[9px] font-bold">
+                                    {st}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </div>
                           <div className="sm:col-span-3 space-y-1.5">
                             <label className="text-[10px] font-bold text-gray-500 uppercase tracking-wide">Unit Price (₹)</label>
