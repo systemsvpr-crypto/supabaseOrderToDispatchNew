@@ -15,6 +15,7 @@ const TableSkeleton = ({ cols = 9 }) => (
             </div>
           </td>
         ))}
+        
       </tr>
     ))}
   </>
