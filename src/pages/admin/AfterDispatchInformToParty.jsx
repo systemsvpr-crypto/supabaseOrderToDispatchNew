@@ -65,7 +65,7 @@ const AfterDispatchInformToParty = () => {
                 *,
                 order:app_orders(*)
             `)
-        .order('created_at', { ascending: false });
+        .order('informed_after_dispatch', { ascending: false });
 
       if (error) throw error;
 

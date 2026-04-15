@@ -355,13 +355,6 @@ const DispatchPlanning = () => {
     return [...locations].sort();
   }, [orders]);
 
-
-
-
-
-
-
-
   const requestSort = useCallback((key) => {
     setSortConfig(prev => ({
       key,
@@ -404,12 +397,7 @@ const DispatchPlanning = () => {
           supabase.from('app_orders').update({ qty: newOrderTotal }).eq('id', order.id)
         );
 
-
-
-
-
-
-        // 2. Prepare History Record
+        // 2. Prepare History Record with additional fields
         currentMaxNo++;
         cancelRecords.push({
           order_id: String(order.id),
@@ -422,7 +410,12 @@ const DispatchPlanning = () => {
           submitted_by: user?.name || 'System',
           dispatch_completed: true,
           informed_before_dispatch: true,
-          informed_after_dispatch: true
+          informed_after_dispatch: true,
+          // NEW FIELDS
+          product_name: order.itemName || null,
+          order_qty: order.qty || 0,
+          client_name: order.clientName || null,
+          order_number: order.orderNo || null
         });
       }
 
@@ -435,7 +428,6 @@ const DispatchPlanning = () => {
       const updateErrors = updateResults.filter(r => r.error).map(r => r.error);
       if (updateErrors.length > 0) {
         console.error('Some order reductions failed:', updateErrors);
-        // We still show success for what worked, or alert the user
       }
 
       showToast('Selected orders quantities permanently reduced.', 'success');
@@ -479,7 +471,7 @@ const DispatchPlanning = () => {
       const { data: currentOrderData } = await supabase.from('app_orders').select('qty').eq('id', order.id).single();
       const newOrderTotal = (parseFloat(currentOrderData?.qty) || 0) - qtyToCancel;
 
-      // 1. FIRST: Track in dispatch_plans for history (Safety Lock)
+      // 1. FIRST: Track in dispatch_plans for history (Safety Lock) with additional fields
       const { error } = await supabase.from('dispatch_plans').insert({
         order_id: order.id,
         dispatch_number: newDNo,
@@ -491,7 +483,12 @@ const DispatchPlanning = () => {
         submitted_by: user?.name || 'System',
         dispatch_completed: true,
         informed_before_dispatch: true,
-        informed_after_dispatch: true
+        informed_after_dispatch: true,
+        // NEW FIELDS
+        product_name: order.itemName || null,
+        order_qty: order.qty || 0,
+        client_name: order.clientName || null,
+        order_number: order.orderNo || null
       });
       if (error) throw error;
 
@@ -645,7 +642,7 @@ const DispatchPlanning = () => {
           [key]: {
             dispatchQty: order.planningPendingQty, // Use the remaining balance as default
             dispatchDate: new Date().toISOString().split('T')[0],
-            gstIncluded: 'Yes',
+            gstIncluded: 'No',
             godownName: order.godownName
           }
         }));
@@ -695,7 +692,12 @@ const DispatchPlanning = () => {
             gst_included: planningData.gstIncluded,
             godown_name: planningData.godownName || order.godownName,
             status: 'Planned',
-            submitted_by: user?.name || 'System'
+            submitted_by: user?.name || 'System',
+            // NEW FIELDS
+            product_name: order.itemName || null,
+            order_qty: order.qty || 0,
+            client_name: order.clientName || null,
+            order_number: order.orderNo || null
           });
         }
       }
@@ -888,35 +890,35 @@ const DispatchPlanning = () => {
                     <th className="px-6 py-4 cursor-pointer hover:bg-gray-100" onClick={() => requestSort('orderNo')}>
                       <div className="flex items-center gap-1">Order No <SortIcon column="orderNo" sortConfig={sortConfig} /></div>
                     </th>
-                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-center" onClick={() => requestSort('orderDate')}>
-                      <div className="flex items-center gap-1 justify-center">Order Date <SortIcon column="orderDate" sortConfig={sortConfig} /></div>
-                    </th>
                     <th className="px-6 py-4 cursor-pointer hover:bg-gray-100" onClick={() => requestSort('clientName')}>
                       <div className="flex items-center gap-1">Client Name <SortIcon column="clientName" sortConfig={sortConfig} /></div>
-                    </th>
-                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-center" onClick={() => requestSort('godownName')}>
-                      <div className="flex items-center gap-1 justify-center">Godown <SortIcon column="godownName" sortConfig={sortConfig} /></div>
                     </th>
                     <th className="px-6 py-4 cursor-pointer hover:bg-gray-100" onClick={() => requestSort('itemName')}>
                       <div className="flex items-center gap-1">Item Name <SortIcon column="itemName" sortConfig={sortConfig} /></div>
                     </th>
-                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('rate')}>
-                      <div className="flex items-center gap-1 justify-end">Rate <SortIcon column="rate" sortConfig={sortConfig} /></div>
+                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-center" onClick={() => requestSort('godownName')}>
+                      <div className="flex items-center gap-1 justify-center">Godown <SortIcon column="godownName" sortConfig={sortConfig} /></div>
                     </th>
                     <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('qty')}>
                       <div className="flex items-center gap-1 justify-end">Order Qty <SortIcon column="qty" sortConfig={sortConfig} /></div>
                     </th>
+                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('planningPendingQty')}>
+                      <div className="flex items-center gap-1 justify-end">Remaining Planning Qty <SortIcon column="planningPendingQty" sortConfig={sortConfig} /></div>
+                    </th>
                     <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('currentStock')}>
                       <div className="flex items-center gap-1 justify-end">Current Stock <SortIcon column="currentStock" sortConfig={sortConfig} /></div>
-                    </th>
-                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('intransitQty')}>
-                      <div className="flex items-center gap-1 justify-end">Intransit Qty <SortIcon column="intransitQty" sortConfig={sortConfig} /></div>
                     </th>
                     <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('planningQty')}>
                       <div className="flex items-center gap-1 justify-end">Planning Qty <SortIcon column="planningQty" sortConfig={sortConfig} /></div>
                     </th>
-                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('planningPendingQty')}>
-                      <div className="flex items-center gap-1 justify-end">Remaining Planning Qty <SortIcon column="planningPendingQty" sortConfig={sortConfig} /></div>
+                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-center" onClick={() => requestSort('orderDate')}>
+                      <div className="flex items-center gap-1 justify-center">Order Date <SortIcon column="orderDate" sortConfig={sortConfig} /></div>
+                    </th>
+                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('rate')}>
+                      <div className="flex items-center gap-1 justify-end">Rate <SortIcon column="rate" sortConfig={sortConfig} /></div>
+                    </th>
+                    <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('intransitQty')}>
+                      <div className="flex items-center gap-1 justify-end">Intransit Qty <SortIcon column="intransitQty" sortConfig={sortConfig} /></div>
                     </th>
                     <th className="px-6 py-4 cursor-pointer hover:bg-gray-100 text-right" onClick={() => requestSort('qtyDelivered')}>
                       <div className="flex items-center gap-1 justify-end">Qty Delivered <SortIcon column="qtyDelivered" sortConfig={sortConfig} /></div>
@@ -1010,19 +1012,21 @@ const DispatchPlanning = () => {
                             </>
                           )}
                           <td className="px-6 py-4 font-bold text-gray-900">{order.orderNo}</td>
-                          <td className="px-6 py-4 text-center text-[11px] font-black uppercase text-gray-500">{formatDisplayDate(order.orderDate)}</td>
                           <td className="px-6 py-4 font-bold text-gray-800">{order.clientName}</td>
-                          <td className="px-6 py-4 text-center font-medium text-gray-600">{order.godownName}</td>
                           <td className="px-6 py-4 font-semibold text-gray-700">{order.itemName}</td>
-                          <td className="px-6 py-4 text-right text-slate-500 font-medium">₹{order.rate}</td>
+                          <td className="px-6 py-4 text-center font-medium text-gray-600">{order.godownName}</td>
                           <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
-                          <td className="px-6 py-4 text-left text-[10px] font-bold text-gray-500 bg-slate-50/50 leading-tight">
+                          <td className="px-6 py-4 text-right font-bold text-primary">{order.planningPendingQty || '0'}</td>
+                          <td className="px-6 py-4 text-right text-[10px] font-bold text-gray-500 bg-slate-50/50 leading-tight">
                             {loadingStock ? (
                               <RefreshCw size={12} className="animate-spin inline text-primary/40" />
                             ) : (
                               order.currentStock || '-'
                             )}
                           </td>
+                          <td className="px-6 py-4 text-right font-bold text-gray-500">{order.planningQty || '0'}</td>
+                          <td className="px-6 py-4 text-center text-[11px] font-black uppercase text-gray-500">{formatDisplayDate(order.orderDate)}</td>
+                          <td className="px-6 py-4 text-right text-slate-500 font-medium">₹{order.rate}</td>
                           <td className="px-6 py-4 text-right font-bold text-gray-500">
                             {loadingIntransit ? (
                               <RefreshCw size={12} className="animate-spin inline text-primary/40" />
@@ -1030,8 +1034,6 @@ const DispatchPlanning = () => {
                               order.intransitQty || '0'
                             )}
                           </td>
-                          <td className="px-6 py-4 text-right font-bold text-gray-500">{order.planningQty || '0'}</td>
-                          <td className="px-6 py-4 text-right font-bold text-primary">{order.planningPendingQty || '0'}</td>
                           <td className="px-6 py-4 text-right font-bold text-green-600">{order.qtyDelivered || '0'}</td>
                         </tr>
                       );
@@ -1176,15 +1178,15 @@ const DispatchPlanning = () => {
                     {[
                       { label: 'Order No', key: 'orderNo' },
                       { label: 'Dispatch No', key: 'dispatchNo' },
-                      { label: 'Disp Qty', key: 'dispatchQty', align: 'right' },
+                      { label: 'Disp Qty', key: 'dispatchQty', align: 'center' },
                       { label: 'Disp Date', key: 'dispatchDate', align: 'center' },
                       { label: 'GST', key: 'gstIncluded', align: 'center' },
                       { label: 'Client', key: 'clientName' },
                       { label: 'Godown', key: 'godownName', align: 'center' },
                       { label: 'Order Date', key: 'orderDate', align: 'center' },
                       { label: 'Item Name', key: 'itemName' },
-                      { label: 'Rate', key: 'rate', align: 'right' },
-                      { label: 'Qty', key: 'qty', align: 'right' }
+                      { label: 'Rate', key: 'rate', align: 'center' },
+                      { label: 'Qty', key: 'qty', align: 'center' }
                     ].map((col) => (
                       <th
                         key={col.key}

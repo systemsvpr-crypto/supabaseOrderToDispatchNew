@@ -96,7 +96,7 @@ const SkipDelivered = () => {
         .from('stock_levels')
         .select('item_name, godown_name, closing_stock')
         .limit(5000);
-      
+
       if (error) throw error;
 
       const sMap = {};
@@ -104,7 +104,7 @@ const SkipDelivered = () => {
         const item = normalize(row.item_name);
         const godown = String(row.godown_name || "").trim();
         const stock = Number(row.closing_stock) || 0;
-        
+
         const displayGodown = godown.toLowerCase() === 'godown' ? 'Gdn' : godown;
         if (!sMap[item]) sMap[item] = [];
         sMap[item].push(`${displayGodown}:${stock}`);
@@ -187,17 +187,17 @@ const SkipDelivered = () => {
         const remaining = (parseFloat(item.qty) || 0) - alreadyPlanned;
 
         const itemKey = normalize(item.item_name);
-        
+
         let stockValues = stockDataMap[itemKey];
         if (!stockValues) {
-            const stockEntry = Object.keys(stockDataMap).find(key =>
-              itemKey.includes(key) || key.includes(itemKey)
-            );
-            if (stockEntry) stockValues = stockDataMap[stockEntry];
+          const stockEntry = Object.keys(stockDataMap).find(key =>
+            itemKey.includes(key) || key.includes(itemKey)
+          );
+          if (stockEntry) stockValues = stockDataMap[stockEntry];
         }
-        
+
         const allStockInfo = stockValues ? stockValues.join(', ') : '-';
-        
+
         return {
           id: item.id,
           originalIndex: idx,
@@ -280,12 +280,12 @@ const SkipDelivered = () => {
           return isNaN(n) ? max : Math.max(max, n);
         }, 1000);
 
-        // 1. FIRST: Insert a "Canceled" plan record for tracking history
+        // 1. FIRST: Insert a "Canceled" plan record for tracking history with additional fields
         const { error: insErr } = await supabase
           .from('dispatch_plans')
           .insert({
             order_id: dbOrderId,
-            dispatch_number: `DN-${maxNo + 1}-CXL`,
+            dispatch_number: `DN-${maxNo + 1}`,
             planned_qty: qtyToCancel,
             planned_date: now.split('T')[0],
             godown_name: edits?.godown || order.godown,
@@ -294,7 +294,12 @@ const SkipDelivered = () => {
             submitted_by: user?.name || 'System',
             dispatch_completed: true,
             informed_before_dispatch: true,
-            informed_after_dispatch: true
+            informed_after_dispatch: true,
+            // NEW FIELDS
+            product_name: order.itemName || null,
+            order_qty: order.orderQty || 0,
+            client_name: order.clientName || null,
+            order_number: order.orderNumber || null
           });
         if (insErr) throw insErr;
 
@@ -376,8 +381,8 @@ const SkipDelivered = () => {
         return {
           ...item,
           currentStock: allStockInfo,
-          intransitQty: intransitDataMap[`${itemKey}|${String(item.godown || "").trim().toLowerCase()}`] !== undefined 
-            ? intransitDataMap[`${itemKey}|${String(item.godown || "").trim().toLowerCase()}`] 
+          intransitQty: intransitDataMap[`${itemKey}|${String(item.godown || "").trim().toLowerCase()}`] !== undefined
+            ? intransitDataMap[`${itemKey}|${String(item.godown || "").trim().toLowerCase()}`]
             : '0'
         };
       }
@@ -385,7 +390,7 @@ const SkipDelivered = () => {
     });
 
     return getSortedItems(
-       enriched.filter(item => {
+      enriched.filter(item => {
         const matchesSearch = Object.values(item).some(val =>
           String(val).toLowerCase().includes(searchTerm.toLowerCase())
         );
@@ -470,7 +475,7 @@ const SkipDelivered = () => {
         maxNo++;
         const dNo = `DN-${maxNo}`;
 
-        // 1. Create plan with all lifecycle flags set to true
+        // 1. Create plan with all lifecycle flags set to true and additional fields
         const { data: newPlan, error: pErr } = await supabase
           .from('dispatch_plans')
           .insert({
@@ -486,13 +491,18 @@ const SkipDelivered = () => {
             is_skip: true,
             submitted_by: user?.name || 'System',
             completed_at: now,
-            informed_at: null
+            informed_at: null,
+            // NEW FIELDS
+            product_name: item.itemName || null,
+            order_qty: item.orderQty || 0,
+            client_name: item.clientName || null,
+            order_number: item.orderNumber || null
           })
           .select().single();
 
         if (pErr) throw pErr;
 
-        // 2. Add to log
+        // 2. Add to log with additional fields
         await supabase.from('dispatch_completed_log').insert({
           dispatch_id: newPlan.id,
           dispatch_number: dNo,
@@ -504,7 +514,9 @@ const SkipDelivered = () => {
           order_qty: parseFloat(item.orderQty) || 0,
           dispatch_qty: parseFloat(edit.dispatchQty) || 0,
           crm_name: user?.name || 'System',
-          status: 'Completed'
+          status: 'Completed',
+          // NEW FIELDS for log as well
+          order_number: item.orderNumber || null
         });
       }
 

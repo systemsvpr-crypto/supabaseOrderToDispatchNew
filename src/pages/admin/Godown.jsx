@@ -63,18 +63,6 @@ const Godown = () => {
 
             if (plansError) throw plansError;
 
-            // 2. Fetch unique godowns for tabs
-            const { data: godowns, error: godownsError } = await supabase
-                .from('master_godowns')
-                .select('godown_name')
-                .order('godown_name');
-
-            if (godownsError) throw godownsError;
-
-            // 3. Update godown list for tabs
-            const uniqueGodowns = [...new Set((godowns || []).map(g => g.godown_name).filter(Boolean))];
-            setGodownList(uniqueGodowns);
-
             // 4. Map the data and filter out canceled records
             const mapped = (plans || [])
                 .filter(item => item.status !== 'Canceled')
@@ -91,6 +79,10 @@ const Godown = () => {
                     gstIncluded: item.gst_included || '-',
                     originalIndex: idx
                 }));
+
+            // Build godown tabs from ACTUAL data to ensure names match exactly
+            const uniqueGodowns = [...new Set(mapped.map(i => i.godown).filter(g => g && g !== '-'))].sort();
+            setGodownList(uniqueGodowns);
 
             setItems(mapped);
         } catch (error) {
@@ -151,8 +143,15 @@ const Godown = () => {
     }, [items, searchTerm, godownFilter, getSortedItems]);
 
     const tabCounts = useMemo(() => godownTabs.reduce((acc, tab) => {
-        if (tab === 'All') acc[tab] = items.length;
-        else acc[tab] = items.filter(item => (item.godown || '').trim().toLowerCase() === tab.toLowerCase()).length;
+        if (tab === 'All') {
+            acc[tab] = items.length;
+        } else {
+            const tabNorm = tab.trim().toLowerCase();
+            acc[tab] = items.filter(item => {
+                const itemGodownNorm = (item.godown || '').trim().toLowerCase();
+                return itemGodownNorm === tabNorm;
+            }).length;
+        }
         return acc;
     }, {}), [items, godownTabs]);
 

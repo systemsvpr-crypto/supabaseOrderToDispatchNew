@@ -55,33 +55,44 @@ const Order = () => {
   const STOCK_LIST_API = import.meta.env.VITE_STOCK_LIST_API;
   const INDENT_API = import.meta.env.VITE_INDENT_API;
 
-  // Abort controller for ongoing fetch
   const abortControllerRef = useRef(null);
 
   const normalize = useCallback((str) =>
     String(str || "")
       .toLowerCase()
       .trim()
-      .replace(/\s+/g, ' ')   // remove extra spaces
-      .replace(/[^a-z0-9*]/g, ''), // remove special chars except *
+      .replace(/\s+/g, ' ')
+      .replace(/[^a-z0-9*]/g, ''), 
     []);
+
+  const fetchAllRows = useCallback(async (table, columns, orderCol) => {
+    const PAGE_SIZE = 1000;
+    let allData = [];
+    let from = 0;
+    while (true) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(columns)
+        .order(orderCol)
+        .range(from, from + PAGE_SIZE - 1);
+      if (error) throw error;
+      allData = allData.concat(data || []);
+      if (!data || data.length < PAGE_SIZE) break;
+      from += PAGE_SIZE;
+    }
+    return allData;
+  }, []);
 
   const fetchStockData = useCallback(async () => {
     setLoadingStock(true);
     try {
-      const { data, error } = await supabase
-        .from('stock_levels')
-        .select('item_name, godown_name, closing_stock')
-        .limit(5000);
-      
-      if (error) throw error;
+      const allStock = await fetchAllRows('stock_levels', 'item_name, godown_name, closing_stock', 'item_name');
 
       const sMap = {};
-      (data || []).forEach(row => {
+      allStock.forEach(row => {
         const item = normalize(row.item_name);
         const godown = String(row.godown_name || "").trim();
         const stock = Number(row.closing_stock) || 0;
-        
         const displayGodown = godown.toLowerCase() === 'godown' ? 'Gdn' : godown;
         if (!sMap[item]) sMap[item] = [];
         sMap[item].push(`${displayGodown}:${stock}`);
@@ -92,24 +103,21 @@ const Order = () => {
     } finally {
       setLoadingStock(false);
     }
-  }, []);
+  }, [fetchAllRows, normalize]);
 
-  // --- Fetch orders from Supabase ---
   const fetchOrdersData = useCallback(async (isRefresh = false) => {
     if (isRefresh) setIsRefreshingOrders(true);
     else setIsLoadingOrders(true);
 
     try {
-      // 1. Fetch only Orders and Canceled Plans from Supabase (FAST)
       const [ordersRes, cancelRes] = await Promise.all([
         supabase.from('app_orders').select('*').order('created_at', { ascending: false }),
         supabase.from('dispatch_plans').select('order_id, planned_qty').eq('status', 'Canceled')
       ]);
- 
+
       if (ordersRes.error) throw ordersRes.error;
       if (cancelRes.error) throw cancelRes.error;
 
-      // 2. Create lookup for Canceled quantities
       const cancelMap = {};
       cancelRes.data.forEach(c => {
         if (c.order_id) {
@@ -117,28 +125,27 @@ const Order = () => {
         }
       });
       
-      // 3. Map orders immediately
       const mappedOrders = (ordersRes.data || []).map((item) => {
         return {
           id: item.id,
           orderNumber: item.order_number || '-',
-          orderDate: item.order_date || '-',
           clientName: item.client_name || '-',
+          orderDate: item.order_date || '-',
           godownName: item.godown_name || '-',
           itemName: item.item_name || '-',
           rate: item.rate || '0',
           qty: item.qty || '0',
           canceledQty: cancelMap[item.id] || 0,
+          planning: '0',
+          remaining: item.qty || '0',
           createdBy: item.submittedby || '-'
         };
       });
 
       setOrders(mappedOrders);
       
-      // 4. Start background fetch for Stock data from Supabase
       fetchStockData();
 
-      // Auto-set next order number in form if empty
       setFormData(prev => ({
           ...prev,
           orderNo: calculateNextOrderNo(mappedOrders)
@@ -153,47 +160,39 @@ const Order = () => {
     }
   }, [showToast, fetchStockData]);
 
-  // --- Fetch master data from Supabase ---
   const fetchMasterData = useCallback(async () => {
     try {
-      const [productsRes, customersRes, godownsRes] = await Promise.all([
-        supabase.from('master_products').select('product_name, godown_name').order('product_name'),
-        supabase.from('master_customers').select('customer_name').order('customer_name'),
-        supabase.from('master_godowns').select('godown_name').order('godown_name')
+      const [productsData, customersData, godownsData] = await Promise.all([
+        fetchAllRows('master_products', 'product_name, godown_name', 'product_name'),
+        fetchAllRows('master_customers', 'customer_name', 'customer_name'),
+        fetchAllRows('master_godowns', 'godown_name', 'godown_name'),
       ]);
 
-      if (productsRes.error) throw productsRes.error;
-      if (customersRes.error) throw customersRes.error;
-      if (godownsRes.error) throw godownsRes.error;
-
       const mapping = {};
-      productsRes.data.forEach(p => {
+      productsData.forEach(p => {
         if (p.product_name) mapping[p.product_name] = p.godown_name;
       });
       setProductGodownMap(mapping);
 
-      setItemNames(productsRes.data.map(p => p.product_name));
-      setClients(customersRes.data.map(c => c.customer_name));
-      setGodowns(godownsRes.data.map(g => g.godown_name));
+      setItemNames(productsData.map(p => p.product_name));
+      setClients(customersData.map(c => c.customer_name));
+      setGodowns(godownsData.map(g => g.godown_name));
     } catch (error) {
       console.error('fetchMasterData error:', error);
       showToast('Error', 'Failed to load master data: ' + error.message);
     }
-  }, [showToast]);
+  }, [showToast, fetchAllRows]);
 
-  // --- Initial data loads ---
   useEffect(() => {
     fetchOrdersData();
     fetchMasterData();
   }, [fetchOrdersData, fetchMasterData]);
 
-  // --- Manual refresh ---
   const handleRefresh = useCallback(() => {
     fetchOrdersData(true);
     fetchMasterData();
   }, [fetchOrdersData, fetchMasterData]);
 
-  // --- Format date for display ---
   const formatDisplayDate = (dateStr) => {
     if (!dateStr || dateStr === '-') return '-';
     try {
@@ -209,7 +208,6 @@ const Order = () => {
     }
   };
 
-  // --- Sorting logic ---
   const requestSort = (key) => {
     let direction = 'asc';
     if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
@@ -245,7 +243,6 @@ const Order = () => {
     });
   }, [sortConfig]);
 
-  // --- Filter options ---
   const filterClients = useMemo(() => [...new Set(orders?.map(o => o.clientName) || [])].filter(Boolean).sort(), [orders]);
   const filterGodowns = useMemo(() => [...new Set(orders?.map(o => o.godownName) || [])].filter(Boolean).sort(), [orders]);
 
@@ -280,7 +277,6 @@ const Order = () => {
     return getSortedItems(filtered);
   }, [orders, searchTerm, clientFilter, godownFilter, stockDataMap, intransitDataMap, getSortedItems]);
 
-  // --- Form handlers ---
   const handleAddItem = () => {
     setFormData(prev => ({
       ...prev,
@@ -300,7 +296,6 @@ const Order = () => {
       const newItems = [...prev.items];
       newItems[index][field] = value;
 
-      // Autofill godown for this specific item if item name is changed
       if (field === 'itemName' && value && productGodownMap[value]) {
         newItems[index].godownName = productGodownMap[value];
       }
@@ -335,7 +330,6 @@ const Order = () => {
       
       const newDNo = `DN-${maxNo + 1}-CXL`;
 
-      // 1. FIRST: Create the history record in dispatch_plans
       const { error: insErr } = await supabase.from('dispatch_plans').insert({
         order_id: order.id,
         dispatch_number: newDNo,
@@ -350,7 +344,6 @@ const Order = () => {
 
       if (insErr) throw insErr;
 
-      // 2. ONLY IF SUCCESSFUL: Permanently REDUCE the qty in the app_orders table
       const newOrderTotal = (parseFloat(order.qty) || 0) - qtyToCancel;
       const { error: ordErr } = await supabase
         .from('app_orders')
@@ -358,7 +351,6 @@ const Order = () => {
         .eq('id', order.id);
       
       if (ordErr) {
-        // Option to handle partial failure log if needed, but for now we throw
         throw ordErr;
       }
 
@@ -382,7 +374,7 @@ const Order = () => {
         order_date: formData.orderDate,
         client_name: formData.clientName,
         godown_name: item.godownName || '-',
-        order_number: formData.orderNo, // Use the generated number
+        order_number: formData.orderNo,
         item_name: item.itemName,
         rate: parseFloat(item.rate) || 0,
         qty: parseInt(item.qty, 10) || 0,
@@ -404,7 +396,6 @@ const Order = () => {
       }));
       setIsModalOpen(false);
 
-      // Refresh orders after successful submission
       await fetchOrdersData(true);
       setTimeout(() => setShowSuccessOverlay(false), 2500);
     } catch (error) {
@@ -419,61 +410,17 @@ const Order = () => {
     }
   };
 
-  // --- Components ---
   const TableSkeleton = () => (
     <>
       {[...Array(6)].map((_, i) => (
         <tr key={i} className="border-b border-gray-100 last:border-0 relative overflow-hidden">
-          <td className="px-6 py-4">
-            <div className="h-4 w-24 bg-gray-100 rounded-lg relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-20 bg-gray-50 rounded-lg mx-auto relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-32 bg-gray-100 rounded-lg relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-24 bg-gray-50 rounded-lg relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-40 bg-gray-100 rounded-lg relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-12 bg-gray-50 rounded-lg ml-auto relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-10 bg-gray-100 rounded-lg ml-auto relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-16 bg-gray-50 rounded-lg ml-auto relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-16 bg-gray-100 rounded-lg ml-auto relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
-          <td className="px-6 py-4">
-            <div className="h-4 w-24 bg-gray-50 rounded-lg mx-auto relative overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
-            </div>
-          </td>
+          {[...Array(14)].map((_, colIdx) => (
+             <td key={colIdx} className="px-6 py-4">
+               <div className="h-4 w-full max-w-[100px] bg-gray-100 rounded-lg relative overflow-hidden">
+                 <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/60 to-transparent animate-shimmer"></div>
+               </div>
+             </td>
+          ))}
         </tr>
       ))}
     </>
@@ -516,10 +463,8 @@ const Order = () => {
     </div>
   );
 
-  // --- Render ---
   return (
     <div className="">
-      {/* Header Section */}
       <div className="flex flex-col gap-4 mb-6 bg-white p-4 lg:p-5 rounded shadow-sm border border-gray-100 max-w-[1200px] mx-auto">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-4">
@@ -528,7 +473,6 @@ const Order = () => {
           </div>
         </div>
 
-        {/* Filters and Actions */}
         <div className="flex flex-col lg:flex-row justify-between gap-4 lg:items-start">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 flex-1 w-full">
             <input
@@ -618,17 +562,20 @@ const Order = () => {
             <thead className="bg-gray-50/50 backdrop-blur-sm border-b border-gray-100 text-[10px] uppercase text-gray-400 font-black tracking-widest sticky top-0 z-10 shadow-sm">
               <tr>
                 {[
-                  { label: 'Order Number', key: 'orderNumber' },
-                  { label: 'Order Date', key: 'orderDate', align: 'center' },
-                  { label: 'Client', key: 'clientName' },
+                  { label: 'Order No', key: 'orderNumber' },
+                  { label: 'Client Name', key: 'clientName' },
+                  { label: 'Item Name', key: 'itemName' },
                   { label: 'Godown', key: 'godownName' },
-                  { label: 'Item', key: 'itemName' },
-                  { label: 'Rate', key: 'rate', align: 'right' },
-                  { label: 'Qty', key: 'qty', align: 'right' },
-                  { label: 'Canceled Qty', key: 'canceledQty', align: 'right' },
-                  { label: 'Current Stock', key: 'currentStock', align: 'right' },
-                  { label: 'Intransit', key: 'intransitQty', align: 'right' },
-                  { label: 'Submitted By', key: 'createdBy', align: 'center' }
+                  { label: 'Order Qty', key: 'qty', align: 'center' }, // Changed to center
+                  // { label: 'Remaining', key: 'remaining', align: 'center' }, // Changed to center
+                  { label: 'Current Stock', key: 'currentStock', align: 'center' }, // Changed to center
+                  // { label: 'Planning', key: 'planning', align: 'center' }, // Changed to center
+                  { label: 'Order Date', key: 'orderDate', align: 'center' },
+                  { label: 'Rate', key: 'rate', align: 'center' }, // Changed to center
+                  { label: 'Canceled Qty', key: 'canceledQty', align: 'center' }, // Changed to center
+                  { label: 'Intransit', key: 'intransitQty', align: 'center' }, // Changed to center
+                  { label: 'Submitted By', key: 'createdBy', align: 'center' },
+                  { label: ' total Order Qty', key: 'totalQty', align: 'center' }, // Changed to center
                 ].map((col) => (
                   <th
                     key={col.key}
@@ -651,7 +598,7 @@ const Order = () => {
                 <TableSkeleton />
               ) : filteredAndSortedOrders.length === 0 ? (
                 <tr>
-                  <td colSpan="11" className="px-6 py-20 text-center">
+                  <td colSpan="14" className="px-6 py-20 text-center">
                     <div className="flex flex-col items-center gap-3">
                       <div className="p-4 bg-gray-50 rounded-full">
                         <Search size={32} className="text-gray-200" />
@@ -667,21 +614,23 @@ const Order = () => {
                       <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-0 bg-primary group-hover:h-8 transition-all duration-300 rounded-r-full"></div>
                       {order.orderNumber}
                     </td>
-                    <td className="px-6 py-4 text-gray-500 text-[11px] font-black uppercase text-center">{formatDisplayDate(order.orderDate)}</td>
                     <td className="px-6 py-4 font-bold text-gray-900">{order.clientName}</td>
-                    <td className="px-6 py-4 text-gray-600 font-medium">{order.godownName}</td>
                     <td className="px-6 py-4 text-gray-800 font-semibold">{order.itemName}</td>
-                    <td className="px-6 py-4 font-medium text-right text-slate-500">₹{order.rate}</td>
-                    <td className="px-6 py-4 text-right font-black text-primary text-base">{order.qty}</td>
-                    <td className="px-6 py-4 text-right font-black text-red-500 text-sm italic">{order.canceledQty > 0 ? `-${order.canceledQty}` : '0'}</td>
-                    <td className="px-6 py-4 text-gray-500 text-[10px] font-bold text-left bg-slate-50/50">
+                    <td className="px-6 py-4 text-gray-600 font-medium">{order.godownName}</td>
+                    <td className="px-6 py-4 text-center font-black text-primary text-base">{order.qty}</td> {/* text-center */}
+                    {/* <td className="px-6 py-4 text-center font-medium text-gray-600">{order.remaining}</td> text-center */}
+                    <td className="px-6 py-4 text-gray-500 text-[10px] font-bold text-center bg-slate-50/50"> {/* text-center */}
                       {loadingStock ? (
                         <RefreshCw size={12} className="animate-spin inline text-primary/40" />
                       ) : (
                         order.currentStock
                       )}
                     </td>
-                    <td className="px-6 py-4 text-gray-500 text-[11px] font-bold text-right">
+                    {/* <td className="px-6 py-4 text-center font-medium text-gray-600">{order.planning}</td> text-center */}
+                    <td className="px-6 py-4 text-gray-500 text-[11px] font-black uppercase text-center">{formatDisplayDate(order.orderDate)}</td>
+                    <td className="px-6 py-4 font-medium text-center text-slate-500">₹{order.rate}</td> {/* text-center */}
+                    <td className="px-6 py-4 text-center font-black text-red-500 text-sm italic">{order.canceledQty > 0 ? `${order.canceledQty}` : '0'}</td> {/* text-center and minus symbol */}
+                    <td className="px-6 py-4 text-gray-500 text-[11px] font-bold text-center"> {/* text-center */}
                       {loadingIntransit ? (
                         <RefreshCw size={12} className="animate-spin inline text-primary/40" />
                       ) : (
@@ -689,12 +638,14 @@ const Order = () => {
                       )}
                     </td>
                     <td className="px-6 py-4 text-[10px] text-center text-gray-400 font-bold uppercase tracking-tighter italic whitespace-nowrap">{order.createdBy}</td>
+                     <td className="px-6 py-4 text-center font-black text-primary text-base">{order.qty+order.canceledQty}</td> {/* text-center */}
                     <td className="px-6 py-4 text-center">
                       <button
                         onClick={() => handleCancelOrder(order)}
                         className="p-1.5 text-red-100 hover:text-red-600 hover:bg-red-50 rounded transition-all"
                         title="Cancel Order Quantity"
                       >
+                        
                         <Trash2 size={16} />
                       </button>
                     </td>
@@ -742,7 +693,7 @@ const Order = () => {
                   </div>
                   <div className="bg-white p-3 rounded-xl border border-gray-100 flex flex-col items-center">
                     <p className="text-red-400 text-[8px] font-black uppercase tracking-tighter mb-1 leading-none">Rejected</p>
-                    <p className="font-black text-red-500 text-lg">{order.canceledQty}</p>
+                    <p className="font-black text-red-500 text-lg">{order.canceledQty > 0 ? `${order.canceledQty}` : '0'}</p>
                   </div>
                   <div className="bg-white p-3 rounded-xl border border-gray-100 flex flex-col items-center">
                     <p className="text-gray-400 text-[8px] font-black uppercase tracking-tighter mb-1 leading-none">Stock</p>
